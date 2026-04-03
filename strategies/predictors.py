@@ -53,6 +53,17 @@ def _uniform() -> ScoreMap:
     return {i: UNIFORM for i in NUMS}
 
 
+WINDOW_BLEND = {
+    "statistical": (0.25, 0.35, 0.40),
+    "ema":         (0.50, 0.30, 0.20),
+    "serial":      (0.55, 0.30, 0.15),
+    "markov":      (0.50, 0.30, 0.20),
+    "zigzag":      (0.60, 0.25, 0.15),
+    "temporal":    (0.20, 0.30, 0.50),
+    "momentum":    (0.55, 0.30, 0.15),
+}
+
+
 # ── Стратегия 1: Статистическая ───────────────────────────────────────────────
 
 def strat_statistical(games: list[dict]) -> ScoreMap:
@@ -347,10 +358,36 @@ def _safe_strategy_scores(games: list[dict]) -> dict[str, ScoreMap]:
     scores: dict[str, ScoreMap] = {}
     for key, fn in STRATEGY_FNS.items():
         try:
-            scores[key] = fn(games)
+            scores[key] = _window_blended_strategy_score(key, games)
         except Exception:
             scores[key] = _uniform()
     return scores
+
+
+def _window_blended_strategy_score(strategy: str, games: list[dict]) -> ScoreMap:
+    fn = STRATEGY_FNS[strategy]
+    n = len(games)
+    if n < 12:
+        return fn(games)
+
+    short_n = min(18, n)
+    mid_n = min(40, n)
+    subsets = (games[:short_n], games[:mid_n], games)
+    blend = WINDOW_BLEND[strategy]
+
+    combined = {i: 0.0 for i in NUMS}
+    total_w = 0.0
+    for subset, weight in zip(subsets, blend):
+        if not subset:
+            continue
+        smap = fn(subset)
+        for num in NUMS:
+            combined[num] += smap.get(num, 0.0) * weight
+        total_w += weight
+
+    if total_w <= 0:
+        return fn(games)
+    return _normalize(combined)
 
 
 def strategy_top_predictions(games: list[dict]) -> dict[str, int]:
@@ -362,26 +399,64 @@ def strategy_top_predictions(games: list[dict]) -> dict[str, int]:
     return tops
 
 
+def _recent_strategy_weight_adjustment(games: list[dict], lookback: int = 28) -> dict[str, float]:
+    """
+    Оценивает, какие стратегии лучше работали на последних известных переходах.
+    Это не заменяет веса из БД, а мягко корректирует их по свежей локальной истории.
+    """
+    if len(games) < 18:
+        return {key: 1.0 for key in STRATEGY_FNS}
+
+    n_checks = min(lookback, len(games) - 6)
+    stats = {key: {"correct": 0, "total": 0} for key in STRATEGY_FNS}
+
+    for offset in range(n_checks):
+        hist = games[offset + 1 :]
+        if len(hist) < 8:
+            break
+        actual = games[offset]["result"]
+        strat_preds = strategy_top_predictions(hist)
+        for key, predicted in strat_preds.items():
+            stats[key]["total"] += 1
+            if predicted == actual:
+                stats[key]["correct"] += 1
+
+    adjusted = {}
+    for key, data in stats.items():
+        total = data["total"]
+        if total <= 0:
+            adjusted[key] = 1.0
+            continue
+        # Сглаженная точность вокруг случайной базы 1/11.
+        hit_rate = (data["correct"] + 1) / (total + 11)
+        baseline = 1 / 11
+        relative = hit_rate / baseline
+        adjusted[key] = min(max(relative, 0.65), 1.55)
+
+    return adjusted
+
+
 def prediction_strength(top_pred: dict) -> float:
     """
     Итоговая сила сигнала 0..100.
     Комбинирует advantage, консенсус и штраф за высокую энтропию.
     """
-    adv = float(top_pred.get("advantage", 0.0))
     supporters = int(top_pred.get("supporters", 0))
     h_ratio = float(top_pred.get("h_ratio", 1.0))
     lift = float(top_pred.get("lift", 1.0))
+    spread = float(top_pred.get("spread", 0.0))
 
-    support_factor = 0.45 + 0.55 * min(supporters / max(len(STRATEGY_FNS), 1), 1.0)
     if h_ratio <= 0.72:
         entropy_factor = 1.0
     elif h_ratio >= 0.94:
-        entropy_factor = 0.35
+        entropy_factor = 0.45
     else:
-        entropy_factor = 1.0 - (h_ratio - 0.72) / (0.94 - 0.72) * 0.65
+        entropy_factor = 1.0 - (h_ratio - 0.72) / (0.94 - 0.72) * 0.55
 
-    lift_factor = min(max((lift - 1.0) / 1.4, 0.0), 1.0) * 0.25 + 0.75
-    strength = adv * support_factor * entropy_factor * lift_factor
+    support_component = min(supporters / max(len(STRATEGY_FNS), 1), 1.0) * 24.0
+    lift_component = min(max((lift - 1.0) / 1.4, 0.0), 1.0) * 34.0
+    spread_component = min(max(spread, 0.0), 1.0) * 42.0
+    strength = (support_component + lift_component + spread_component) * entropy_factor
     return round(max(0.0, min(strength, 99.0)), 1)
 
 
@@ -435,6 +510,10 @@ def predict(
         w["statistical"] = w.get("statistical",  0) * 1.5
         w["ema"]         = w.get("ema",          0) * 1.35
 
+    recent_adj = _recent_strategy_weight_adjustment(games)
+    for key, factor in recent_adj.items():
+        w[key] = w.get(key, 0.0) * factor
+
     # Нормализуем веса
     w_total = sum(w.values()) or 1
     norm_w  = {k: v / w_total for k, v in w.items()}
@@ -465,6 +544,7 @@ def predict(
     # Softmax с temperature=0.7 (умереннее, чем 0.4 в v5)
     softmaxed = _softmax(combined, temperature=0.7)
     ranked    = sorted(softmaxed.items(), key=lambda x: x[1], reverse=True)
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
 
     results = []
     for num, score in ranked[:top_n]:
@@ -481,6 +561,8 @@ def predict(
             1 for key, smap in strat_scores.items()
             if smap.get(num, 0) > UNIFORM * 1.4
         )
+        score_gap = max(score - second_score, 0.0)
+        spread = score_gap / max(score, 1e-9)
 
         explanation = _build_explanation(num, games, strat_scores, norm_w, h_ratio, H)
 
@@ -494,8 +576,11 @@ def predict(
                 "supporters": supporters,
                 "h_ratio": h_ratio,
                 "lift": lift,
+                "spread": spread,
             }),
             "lift":            round(lift, 2),
+            "score_gap":       round(score_gap, 4),
+            "spread":          round(spread, 3),
             "strategy_scores": {k: round(v.get(num, 0) * 100, 1) for k, v in strat_scores.items()},
             "explanation":     explanation,
             "entropy":         round(H, 2),

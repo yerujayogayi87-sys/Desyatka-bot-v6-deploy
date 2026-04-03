@@ -58,6 +58,7 @@ def fmt_pred(preds: list[dict]) -> str:
         m    = medals[i] if i < len(medals) else "  "
         prob = p.get("probability", p.get("score", 0) * 100)
         adv  = p.get("advantage", 0)
+        strength = p.get("strength", 0)
         lift = p.get("lift", 1.0)
         sup  = p.get("supporters", 0)
         n_s  = len(p.get("strategy_scores", {})) or 7
@@ -80,7 +81,7 @@ def fmt_pred(preds: list[dict]) -> str:
         lines.append(
             f"{m} *{ne(p['number'])}* {sig_icon}\n"
             f"   `{prob_bar}` {prob:.1f}% вероятность · {adv_str} к базе\n"
-            f"   Lift ×{lift:.2f} · {sup}/{n_s} стратегий согласны\n"
+            f"   Сила {strength:.0f}/100 · Lift ×{lift:.2f} · {sup}/{n_s} стратегий\n"
             f"   _{p['explanation']}_"
         )
 
@@ -101,6 +102,7 @@ def fmt_pred_detail(preds: list[dict]) -> str:
         m    = medals[i] if i < len(medals) else "  "
         prob = p.get("probability", 0)
         adv  = p.get("advantage", 0)
+        strength = p.get("strength", 0)
         lift = p.get("lift", 1.0)
         sup  = p.get("supporters", 0)
         ss   = p.get("strategy_scores", {})
@@ -115,7 +117,7 @@ def fmt_pred_detail(preds: list[dict]) -> str:
 
         lines.append(
             f"{m} *{ne(p['number'])}* — {prob:.1f}% · {adv_str}\n"
-            f"   Lift ×{lift:.2f} · {sup}/{n_s} стратегий\n"
+            f"   Сила {strength:.0f}/100 · Lift ×{lift:.2f} · {sup}/{n_s} стратегий\n"
             f"   `{strat_line}`\n"
             f"   _{p['explanation']}_"
         )

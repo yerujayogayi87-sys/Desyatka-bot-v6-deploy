@@ -59,6 +59,7 @@ async def _make_prediction(uid: int, pause_override: bool = False) -> tuple[str,
         f"🎯 *Прогноз · {n_games} игр в базе*\n"
         f"{pause_note}\n"
         f"{fmt_pred(preds)}\n\n"
+        "ℹ️ *Прогноз всегда показывает топ-3 числа; решение по ставке смотри отдельно ниже.*\n\n"
         f"💡 *Ставка:* {bet_rec}\n"
         f"{adv_summary}\n\n"
         f"🌀 *Энтропия:* {fmt_entropy(H)}"
