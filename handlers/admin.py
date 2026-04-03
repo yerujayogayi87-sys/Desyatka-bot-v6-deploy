@@ -19,7 +19,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database import (
     is_admin, create_token, get_active_tokens,
     get_all_tokens, revoke_token, get_allowed_users_list,
-    ADMIN_ID, backup_db, restore_games_from_file, get_total,
+    ADMIN_ID, backup_db, restore_games_from_file, get_total, get_restore_source_path,
 )
 
 log = logging.getLogger(__name__)
@@ -270,7 +270,8 @@ async def cb_revoke_token(callback: CallbackQuery):
 async def cb_restore_base(callback: CallbackQuery):
     try:
         backup_db()
-        stats = restore_games_from_file(RESTORE_HISTORY_PATH, truncate=True)
+        restore_source = get_restore_source_path(RESTORE_HISTORY_PATH)
+        stats = restore_games_from_file(restore_source, truncate=True)
         total = get_total(callback.from_user.id)
         text = (
             "♻️ *База восстановлена*\n\n"

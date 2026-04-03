@@ -188,7 +188,7 @@ async def main():
     from aiogram.fsm.storage.memory import MemoryStorage
     from aiogram.client.default import DefaultBotProperties
 
-    from database import init_db, backup_db
+    from database import init_db, backup_db, create_history_snapshot
     from handlers import (
         main_menu_router, add_game_router, predict_router,
         stats_router, history_router, settings_router, admin_router,
@@ -231,10 +231,20 @@ async def main():
     async def _backup_async():
         import asyncio
         await asyncio.to_thread(backup_db)
+    async def _snapshot_async():
+        import asyncio
+        await asyncio.to_thread(create_history_snapshot)
     scheduler.add_job(_backup_async, "interval", hours=6)
+    scheduler.add_job(_snapshot_async, "interval", hours=6)
     scheduler.add_job(_send_alerts, "interval", minutes=30, args=[bot])
     scheduler.start()
-    log.info("Планировщик запущен (бэкап: 6ч · алерты: 30мин).")
+    try:
+        await _snapshot_async()
+        log.info("Стартовый snapshot истории сохранён.")
+    except Exception as e:
+        log.warning(f"Не удалось сохранить стартовый snapshot: {e}")
+
+    log.info("Планировщик запущен (бэкап: 6ч · snapshot: 6ч · алерты: 30мин).")
 
     log.info("Бот v6 запускается…")
     try:

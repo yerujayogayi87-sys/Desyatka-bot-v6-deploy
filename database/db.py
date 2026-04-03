@@ -22,6 +22,9 @@ from typing import Optional
 
 DB_PATH  = os.getenv("DB_PATH", "games.db")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))   # ваш Telegram user_id
+SNAPSHOT_DIR = Path(os.getenv("DB_SNAPSHOT_DIR", "snapshots"))
+SNAPSHOT_LATEST_NAME = os.getenv("DB_SNAPSHOT_LATEST", "history_latest.json")
+SNAPSHOT_KEEP = int(os.getenv("DB_SNAPSHOT_KEEP", "8"))
 
 STRATEGIES = ["statistical", "ema", "serial", "markov", "zigzag", "temporal", "momentum"]
 
@@ -360,6 +363,18 @@ def get_games(user_id: int, limit: Optional[int] = None) -> list[dict]:
     return rows
 
 
+def get_all_games(limit: Optional[int] = None) -> list[dict]:
+    con = _conn()
+    cur = con.cursor()
+    if limit:
+        cur.execute("SELECT * FROM games ORDER BY id DESC LIMIT ?", (limit,))
+    else:
+        cur.execute("SELECT * FROM games ORDER BY id DESC")
+    rows = [dict(r) for r in cur.fetchall()]
+    con.close()
+    return rows
+
+
 def get_total(user_id: int) -> int:
     con = _conn()
     cur = con.cursor()
@@ -482,6 +497,51 @@ def restore_games_from_file(path: str, truncate: bool = True) -> dict:
         "skipped": skipped,
         "truncate": truncate,
     }
+
+
+def export_all_games_json(path: str) -> int:
+    games = get_all_games()
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as fh:
+        json.dump(games, fh, ensure_ascii=False, indent=2)
+    return len(games)
+
+
+def create_history_snapshot() -> dict:
+    """
+    Сохраняет полный snapshot всех игр:
+    - snapshots/history_latest.json
+    - snapshots/history_YYYYMMDD_HHMMSS.json
+    """
+    init_db()
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    latest_path = SNAPSHOT_DIR / SNAPSHOT_LATEST_NAME
+    archive_path = SNAPSHOT_DIR / f"history_{ts}.json"
+
+    rows = export_all_games_json(str(latest_path))
+    shutil.copy2(latest_path, archive_path)
+
+    archived = sorted(SNAPSHOT_DIR.glob("history_*.json"))
+    for old in archived[:-SNAPSHOT_KEEP]:
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
+    return {
+        "rows": rows,
+        "latest_path": str(latest_path),
+        "archive_path": str(archive_path),
+    }
+
+
+def get_restore_source_path(default_seed: str = "seed_history.json") -> str:
+    latest_path = SNAPSHOT_DIR / SNAPSHOT_LATEST_NAME
+    if latest_path.exists():
+        return str(latest_path)
+    return default_seed
 
 
 # ──────────────────────────── Settings ────────────────────────────────────────
