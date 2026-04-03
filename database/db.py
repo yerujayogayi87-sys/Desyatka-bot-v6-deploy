@@ -540,7 +540,12 @@ def create_history_snapshot() -> dict:
 def get_restore_source_path(default_seed: str = "seed_history.json") -> str:
     latest_path = SNAPSHOT_DIR / SNAPSHOT_LATEST_NAME
     if latest_path.exists():
-        return str(latest_path)
+        try:
+            data = json.loads(latest_path.read_text(encoding="utf-8"))
+            if isinstance(data, list) and len(data) > 0:
+                return str(latest_path)
+        except Exception:
+            pass
     return default_seed
 
 
