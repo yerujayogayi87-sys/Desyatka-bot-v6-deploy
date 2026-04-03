@@ -113,9 +113,10 @@ class AccessMiddleware(BaseMiddleware):
 async def _send_alerts(bot):
     from database import (
         get_games, get_active_users,
-        get_notification_last, set_notification_sent,
+        get_notification_last, set_notification_sent, get_weights,
     )
     from analytics import get_alerts, even_odd_streak, find_runs, gap_analysis, shannon_entropy
+    from strategies import predict
 
     user_ids = get_active_users(hours=24)
 
@@ -159,6 +160,16 @@ async def _send_alerts(bot):
 
             if H / math.log2(11) < 0.55 and total >= 15:
                 critical.append(f"🎯 Низкая энтропия ({H:.2f}) — паттерн предсказуем")
+
+            weights = get_weights(uid)
+            preds = predict(games, weights, top_n=3)
+            if preds:
+                top = preds[0]
+                if top.get("strength", 0) >= 18:
+                    critical.append(
+                        f"🎯 Прогноз: {top['number']} "
+                        f"(сила {top.get('strength', 0):.0f}/100, lift ×{top.get('lift', 1.0):.2f})"
+                    )
 
             if critical:
                 msg = "🔔 *Десятка — Алерт*\n\n" + "\n".join(critical)

@@ -343,6 +343,48 @@ STRATEGY_NAMES_RU = {
 }
 
 
+def _safe_strategy_scores(games: list[dict]) -> dict[str, ScoreMap]:
+    scores: dict[str, ScoreMap] = {}
+    for key, fn in STRATEGY_FNS.items():
+        try:
+            scores[key] = fn(games)
+        except Exception:
+            scores[key] = _uniform()
+    return scores
+
+
+def strategy_top_predictions(games: list[dict]) -> dict[str, int]:
+    """Лучшее число по каждой стратегии отдельно."""
+    strat_scores = _safe_strategy_scores(games)
+    tops: dict[str, int] = {}
+    for key, smap in strat_scores.items():
+        tops[key] = max(smap.items(), key=lambda item: item[1])[0]
+    return tops
+
+
+def prediction_strength(top_pred: dict) -> float:
+    """
+    Итоговая сила сигнала 0..100.
+    Комбинирует advantage, консенсус и штраф за высокую энтропию.
+    """
+    adv = float(top_pred.get("advantage", 0.0))
+    supporters = int(top_pred.get("supporters", 0))
+    h_ratio = float(top_pred.get("h_ratio", 1.0))
+    lift = float(top_pred.get("lift", 1.0))
+
+    support_factor = 0.45 + 0.55 * min(supporters / max(len(STRATEGY_FNS), 1), 1.0)
+    if h_ratio <= 0.72:
+        entropy_factor = 1.0
+    elif h_ratio >= 0.94:
+        entropy_factor = 0.35
+    else:
+        entropy_factor = 1.0 - (h_ratio - 0.72) / (0.94 - 0.72) * 0.65
+
+    lift_factor = min(max((lift - 1.0) / 1.4, 0.0), 1.0) * 0.25 + 0.75
+    strength = adv * support_factor * entropy_factor * lift_factor
+    return round(max(0.0, min(strength, 99.0)), 1)
+
+
 # ── Главный движок ────────────────────────────────────────────────────────────
 
 def predict(
@@ -398,12 +440,7 @@ def predict(
     norm_w  = {k: v / w_total for k, v in w.items()}
 
     # Вычисляем скоры каждой стратегии
-    strat_scores: dict[str, ScoreMap] = {}
-    for key, fn in STRATEGY_FNS.items():
-        try:
-            strat_scores[key] = fn(games)
-        except Exception:
-            strat_scores[key] = _uniform()
+    strat_scores = _safe_strategy_scores(games)
 
     # Взвешенная сумма
     combined: dict[int, float] = {}
@@ -452,6 +489,12 @@ def predict(
             "score":           score,
             "probability":     round(score * 100, 1),   # реальная вероятность %
             "advantage":       advantage_pct,            # преимущество над случайным
+            "strength":        prediction_strength({
+                "advantage": advantage_pct,
+                "supporters": supporters,
+                "h_ratio": h_ratio,
+                "lift": lift,
+            }),
             "lift":            round(lift, 2),
             "strategy_scores": {k: round(v.get(num, 0) * 100, 1) for k, v in strat_scores.items()},
             "explanation":     explanation,
@@ -527,18 +570,18 @@ def bet_recommendation(top_pred: dict, weights: dict) -> str:
     Убраны завышенные пороги v5.
     """
     adv        = top_pred.get("advantage", 0)
+    strength   = top_pred.get("strength", prediction_strength(top_pred))
     lift       = top_pred.get("lift", 1.0)
     supporters = top_pred.get("supporters", 0)
-    prob       = top_pred.get("probability", 9.1)
 
     n_strats   = len(STRATEGY_FNS)
     consensus  = supporters >= n_strats - 2   # 5 из 7
 
-    if adv >= 30 and consensus and lift >= 1.8:
+    if strength >= 26 and adv >= 22 and consensus and lift >= 1.65:
         return "🟢 Уверенная — сильный консенсус стратегий"
-    elif adv >= 18 and (supporters >= 4 or lift >= 1.4):
+    elif strength >= 15 and adv >= 12 and (supporters >= 4 or lift >= 1.35):
         return "🟡 Осторожная — умеренный сигнал"
-    elif adv >= 8:
+    elif strength >= 7 and adv >= 6:
         return "🟠 Слабая — сигнал минимален, минимальная ставка"
     else:
         return "🔴 Пропустить — стратегии не согласованы"

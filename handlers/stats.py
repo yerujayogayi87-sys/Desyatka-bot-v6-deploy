@@ -23,7 +23,7 @@ from analytics import (
     make_history_heatmap, make_strategy_radar,
     shannon_entropy,
 )
-from strategies import predict, bet_recommendation
+from strategies import predict, bet_recommendation, prediction_strength
 from keyboards import kb_stats, kb_back_main
 from utils import ne, bar, fmt_entropy
 
@@ -458,20 +458,20 @@ async def cb_autopilot(callback: CallbackQuery):
         return
 
     top        = preds[0]
-    conf       = top["confidence"]
+    conf       = top.get("strength", prediction_strength(top))
     lift       = top.get("lift", 1.0)
     supporters = top.get("supporters", 0)
     ss         = top.get("strategy_scores", {})
-    agreement  = sum(1 for v in ss.values() if v > 9)
+    agreement  = sum(1 for v in ss.values() if v > 11)
     H          = shannon_entropy(games, window=25)
     h_ratio    = H / math.log2(11)
 
     # Логика решения с учётом энтропии
-    if conf >= 55 and agreement >= 4 and lift >= 1.8 and h_ratio < 0.85:
+    if conf >= 28 and agreement >= 4 and lift >= 1.55 and h_ratio < 0.82:
         decision = "✅ СТАВИТЬ"
         reason   = "высокий консенсус + хороший lift + паттерн активен"
         color    = "🟢"
-    elif conf >= 38 and (agreement >= 3 or lift >= 1.4):
+    elif conf >= 16 and (agreement >= 3 or lift >= 1.35):
         decision = "⚡ ОСТОРОЖНО"
         reason   = "умеренный сигнал"
         color    = "🟡"
@@ -495,8 +495,8 @@ async def cb_autopilot(callback: CallbackQuery):
         f"{color} *{decision}*\n"
         f"_{reason}_\n\n"
         f"🎯 Числа: {top_nums}\n"
-        f"📊 Уверенность: {conf:.0f}%  Lift: ×{lift:.2f}\n"
-        f"🤝 Консенсус: {agreement}/6 стратегий\n"
+        f"📊 Сила сигнала: {conf:.0f}/100  Lift: ×{lift:.2f}\n"
+        f"🤝 Консенсус: {agreement}/{len(ss) or 7} стратегий\n"
         f"🌀 Энтропия: {fmt_entropy(H)}\n\n"
         f"_Пропускает если энтропия > 90% или консенсус ≤ 1_"
     )
@@ -540,12 +540,12 @@ async def cb_calibration(callback: CallbackQuery):
         preds = predict(hist, weights, top_n=3)
         if not preds:
             continue
-        top_conf = preds[0]["confidence"]
+        top_conf = preds[0].get("strength", prediction_strength(preds[0]))
         hit = actual in [p["number"] for p in preds]
 
-        if top_conf >= 55:
+        if top_conf >= 28:
             b = buckets["high"]
-        elif top_conf >= 30:
+        elif top_conf >= 14:
             b = buckets["medium"]
         else:
             b = buckets["low"]
@@ -557,9 +557,9 @@ async def cb_calibration(callback: CallbackQuery):
 
     lines = ["🔬 *Калибровка модели*\n_(заявленная уверенность vs реальная точность)_\n"]
     labels = {
-        "high":   "🟢 Высокая (≥55%)",
-        "medium": "🟡 Средняя (30–54%)",
-        "low":    "🔴 Низкая (<30%)",
+        "high":   "🟢 Высокая (≥28)",
+        "medium": "🟡 Средняя (14–27)",
+        "low":    "🔴 Низкая (<14)",
     }
 
     for key, label in labels.items():

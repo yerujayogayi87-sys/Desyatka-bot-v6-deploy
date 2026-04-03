@@ -5,13 +5,22 @@ from aiogram import Router
 from aiogram.types import CallbackQuery
 
 from database import get_games, get_weights, record_prediction, get_settings, is_allowed
-from strategies import predict, bet_recommendation
+from strategies import predict, bet_recommendation, strategy_top_predictions
 from analytics import detect_pause, shannon_entropy
 from keyboards import kb_predict, kb_back_main
 from utils import fmt_pred, fmt_pred_detail, fmt_weights, fmt_entropy, fmt_advantage_summary
 
 log = logging.getLogger(__name__)
 router = Router()
+
+
+def _record_prediction_set(uid: int, games: list[dict], preds: list[dict]) -> None:
+    if not preds:
+        return
+    for p in preds:
+        record_prediction(uid, "combined", p["number"])
+    for strategy, number in strategy_top_predictions(games).items():
+        record_prediction(uid, strategy, number)
 
 
 async def _make_prediction(uid: int, pause_override: bool = False) -> tuple[str, bool]:
@@ -34,10 +43,7 @@ async def _make_prediction(uid: int, pause_override: bool = False) -> tuple[str,
     weights = get_weights(uid)
     preds   = predict(games, weights, top_n=3, pause_detected=pd)
 
-    for p in preds:
-        record_prediction(uid, "combined", p["number"])
-    if preds:
-        record_prediction(uid, "statistical", preds[0]["number"])
+    _record_prediction_set(uid, games, preds)
 
     bet_rec     = bet_recommendation(preds[0], weights) if preds else "—"
     H           = shannon_entropy(games, window=25)

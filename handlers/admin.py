@@ -6,7 +6,7 @@ handlers/admin.py — Панель администратора v6.
 """
 
 import logging
-from datetime import datetime
+import os
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -19,11 +19,12 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database import (
     is_admin, create_token, get_active_tokens,
     get_all_tokens, revoke_token, get_allowed_users_list,
-    ADMIN_ID,
+    ADMIN_ID, backup_db, restore_games_from_file, get_total,
 )
 
 log = logging.getLogger(__name__)
 router = Router()
+RESTORE_HISTORY_PATH = os.getenv("RESTORE_HISTORY_PATH", "seed_history.json")
 
 
 # ── Клавиатуры ────────────────────────────────────────────────────────────────
@@ -41,6 +42,9 @@ def kb_admin_menu() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="📋 Активные токены",  callback_data="admin_list_tokens"),
         InlineKeyboardButton(text="👥 Активные юзеры",   callback_data="admin_list_users"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="♻️ Восстановить базу", callback_data="admin_restore_base"),
     )
     builder.row(
         InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu"),
@@ -93,7 +97,8 @@ async def cmd_admin(message: Message):
         "🔐 *Панель администратора*\n\n"
         "Здесь вы можете сгенерировать временный токен доступа для клиента.\n"
         "Каждый токен — одноразовый, привязывается к пользователю при активации.\n\n"
-        "Ваши данные *никогда* не смешиваются с данными клиентов.",
+        "Ваши данные *никогда* не смешиваются с данными клиентов.\n\n"
+        f"_Seed для восстановления: `{RESTORE_HISTORY_PATH}`_",
         parse_mode="Markdown",
         reply_markup=kb_admin_menu(),
     )
@@ -105,7 +110,8 @@ async def cb_admin_panel(callback: CallbackQuery):
     try:
         await callback.message.edit_text(
             "🔐 *Панель администратора*\n\n"
-            "Выберите срок действия токена или просмотрите активных пользователей.",
+            "Выберите срок действия токена, просмотрите активных пользователей "
+            "или восстановите базу из seed-файла.",
             parse_mode="Markdown",
             reply_markup=kb_admin_menu(),
         )
@@ -257,3 +263,35 @@ async def cb_revoke_token(callback: CallbackQuery):
         )
     except Exception:
         pass
+
+
+@router.callback_query(lambda c: c.data == "admin_restore_base")
+@admin_only
+async def cb_restore_base(callback: CallbackQuery):
+    try:
+        backup_db()
+        stats = restore_games_from_file(RESTORE_HISTORY_PATH, truncate=True)
+        total = get_total(callback.from_user.id)
+        text = (
+            "♻️ *База восстановлена*\n\n"
+            f"Источник: `{stats['source']}`\n"
+            f"Строк в файле: *{stats['rows']}*\n"
+            f"Добавлено: *{stats['inserted']}*\n"
+            f"Пропущено как дубли: *{stats['skipped']}*\n"
+            f"Игр в вашей базе сейчас: *{total}*"
+        )
+        try:
+            await callback.message.edit_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=kb_back_admin(),
+            )
+        except Exception:
+            await callback.message.answer(
+                text,
+                parse_mode="Markdown",
+                reply_markup=kb_back_admin(),
+            )
+        await callback.answer("База восстановлена.", show_alert=True)
+    except Exception as exc:
+        await callback.answer(f"Ошибка восстановления: {exc}", show_alert=True)

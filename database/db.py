@@ -17,6 +17,7 @@ import shutil
 import secrets
 import string
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 DB_PATH  = os.getenv("DB_PATH", "games.db")
@@ -402,6 +403,87 @@ def clear_games(user_id: int):
     con.close()
 
 
+def restore_games_from_file(path: str, truncate: bool = True) -> dict:
+    """
+    Восстанавливает историю игр из JSON/CSV экспорта.
+    Используется для быстрого поднятия базы после деплоя.
+    """
+    source = Path(path)
+    if not source.exists():
+        raise FileNotFoundError(f"Файл не найден: {source}")
+
+    suffix = source.suffix.lower()
+    if suffix == ".json":
+        rows = json.loads(source.read_text(encoding="utf-8"))
+    elif suffix == ".csv":
+        with source.open("r", encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+    else:
+        raise ValueError("Поддерживаются только .json и .csv файлы")
+
+    normalized = []
+    for row in rows:
+        normalized.append({
+            "id": int(row["id"]),
+            "user_id": int(row["user_id"]),
+            "game_number": str(row.get("game_number") or ""),
+            "result": int(row["result"]),
+            "added_at": str(row["added_at"]),
+            "hour_of_day": int(row["hour_of_day"]) if str(row.get("hour_of_day", "")) != "" else None,
+            "day_of_week": int(row["day_of_week"]) if str(row.get("day_of_week", "")) != "" else None,
+        })
+
+    con = _conn()
+    cur = con.cursor()
+
+    if truncate:
+        cur.execute("DELETE FROM games")
+        cur.execute("DELETE FROM predictions")
+        cur.execute("DELETE FROM strategy_weights")
+        cur.execute("DELETE FROM notification_log")
+
+    cur.execute("SELECT user_id, game_number, result, added_at FROM games")
+    existing = {
+        (int(r["user_id"]), str(r["game_number"] or ""), int(r["result"]), str(r["added_at"]))
+        for r in cur.fetchall()
+    }
+
+    inserted = 0
+    skipped = 0
+    for row in sorted(normalized, key=lambda item: (item["added_at"], item["id"])):
+        key = (row["user_id"], row["game_number"], row["result"], row["added_at"])
+        if key in existing:
+            skipped += 1
+            continue
+        cur.execute(
+            """
+            INSERT INTO games (id, user_id, game_number, result, added_at, hour_of_day, day_of_week)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["id"],
+                row["user_id"],
+                row["game_number"],
+                row["result"],
+                row["added_at"],
+                row["hour_of_day"],
+                row["day_of_week"],
+            ),
+        )
+        existing.add(key)
+        inserted += 1
+
+    con.commit()
+    con.close()
+    return {
+        "source": str(source),
+        "rows": len(normalized),
+        "inserted": inserted,
+        "skipped": skipped,
+        "truncate": truncate,
+    }
+
+
 # ──────────────────────────── Settings ────────────────────────────────────────
 
 def get_settings(user_id: int) -> dict:
@@ -623,10 +705,11 @@ def set_notification_sent(user_id: int):
 def get_active_users(hours: int = 24) -> list[int]:
     con = _conn()
     cur = con.cursor()
+    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat(timespec="seconds")
     cur.execute(
         """SELECT DISTINCT user_id FROM games
-           WHERE added_at >= datetime('now', ?)""",
-        (f"-{hours} hours",)
+           WHERE added_at >= ?""",
+        (cutoff,)
     )
     users = [row["user_id"] for row in cur.fetchall()]
     con.close()

@@ -17,7 +17,7 @@ from database import (
     add_game, add_games_bulk, get_games, get_total, get_weights,
     record_prediction, update_strategy_stats, get_settings, is_allowed,
 )
-from strategies import predict, bet_recommendation
+from strategies import predict, bet_recommendation, strategy_top_predictions
 from analytics import get_alerts, detect_pause, shannon_entropy
 from keyboards import kb_number_input, kb_after_add, kb_pause_detected, kb_main_menu
 from utils import ne, fmt_pred, fmt_entropy
@@ -224,6 +224,7 @@ async def _handle_bulk(message: Message, results: list):
         weights    = get_weights(uid)
         preds      = predict(games, weights, top_n=3)
         _record_all_preds(uid, preds)
+        _record_strategy_preds(uid, games)
         bet_rec    = bet_recommendation(preds[0], weights) if preds else ""
         alerts     = get_alerts(games)
         H          = shannon_entropy(games, window=25)
@@ -336,6 +337,7 @@ async def _send_add_result(callback, uid, result, new_id, total, game_number, ga
         weights    = get_weights(uid)
         preds      = predict(games, weights, top_n=3, pause_detected=pause_detected)
         _record_all_preds(uid, preds)
+        _record_strategy_preds(uid, games)
         bet_rec    = bet_recommendation(preds[0], weights) if preds else ""
         H          = shannon_entropy(games, window=25)
         alerts     = get_alerts(games)
@@ -372,7 +374,11 @@ def _record_all_preds(uid: int, preds: list):
         return
     for p in preds:
         record_prediction(uid, "combined", p["number"])
-    record_prediction(uid, "statistical", preds[0]["number"])
+
+
+def _record_strategy_preds(uid: int, games: list[dict]):
+    for strategy, number in strategy_top_predictions(games).items():
+        record_prediction(uid, strategy, number)
 
 
 @router.callback_query(lambda c: c.data == "cancel_add")

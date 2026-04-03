@@ -7,7 +7,7 @@ from .db import (
     revoke_token, get_allowed_users_list,
     # Games
     add_game, add_games_bulk, get_games, get_total,
-    delete_last, delete_game_by_id, clear_games,
+    delete_last, delete_game_by_id, clear_games, restore_games_from_file,
     # Settings
     get_settings, save_settings,
     # Weights & predictions
