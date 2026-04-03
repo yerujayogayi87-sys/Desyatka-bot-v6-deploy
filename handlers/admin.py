@@ -20,6 +20,7 @@ from database import (
     is_admin, create_token, get_active_tokens,
     get_all_tokens, revoke_token, get_allowed_users_list,
     ADMIN_ID, backup_db, restore_games_from_file, get_total, get_restore_source_path,
+    create_history_snapshot,
 )
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ def kb_admin_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="👥 Активные юзеры",   callback_data="admin_list_users"),
     )
     builder.row(
+        InlineKeyboardButton(text="💾 Сохранить базу",    callback_data="admin_save_base"),
         InlineKeyboardButton(text="♻️ Восстановить базу", callback_data="admin_restore_base"),
     )
     builder.row(
@@ -296,3 +298,33 @@ async def cb_restore_base(callback: CallbackQuery):
         await callback.answer("База восстановлена.", show_alert=True)
     except Exception as exc:
         await callback.answer(f"Ошибка восстановления: {exc}", show_alert=True)
+
+
+@router.callback_query(lambda c: c.data == "admin_save_base")
+@admin_only
+async def cb_save_base(callback: CallbackQuery):
+    try:
+        stats = create_history_snapshot()
+        total = get_total(callback.from_user.id)
+        text = (
+            "💾 *Snapshot сохранён*\n\n"
+            f"Игр в вашей базе: *{total}*\n"
+            f"Строк в snapshot: *{stats['rows']}*\n"
+            f"Последний файл: `{stats['latest_path']}`\n"
+            f"Архивный файл: `{stats['archive_path']}`"
+        )
+        try:
+            await callback.message.edit_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=kb_back_admin(),
+            )
+        except Exception:
+            await callback.message.answer(
+                text,
+                parse_mode="Markdown",
+                reply_markup=kb_back_admin(),
+            )
+        await callback.answer("Snapshot сохранён.", show_alert=True)
+    except Exception as exc:
+        await callback.answer(f"Ошибка сохранения: {exc}", show_alert=True)
