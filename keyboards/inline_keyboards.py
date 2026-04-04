@@ -9,8 +9,8 @@ def kb_main_menu(uid: int = 0) -> InlineKeyboardMarkup:
     from database import is_admin
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить игру",   callback_data="add_game"),
-        InlineKeyboardButton(text="🎯 Прогноз числа",   callback_data="get_predict"),
+        InlineKeyboardButton(text="➕ Добавить цифру",  callback_data="add_game"),
+        InlineKeyboardButton(text="🎯 Прогноз",         callback_data="get_predict"),
     )
     builder.row(
         InlineKeyboardButton(text="⚖️ Чёт / Нечет",     callback_data="predict_even_odd"),
@@ -50,11 +50,11 @@ def kb_after_add() -> InlineKeyboardMarkup:
 def kb_predict() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="➕ Добавить игру",    callback_data="add_game"),
-        InlineKeyboardButton(text="📝 Подробнее",        callback_data="predict_detail"),
+        InlineKeyboardButton(text="➕ Добавить цифру",   callback_data="add_game"),
+        InlineKeyboardButton(text="📝 Разбор",           callback_data="predict_detail"),
     )
     builder.row(
-        InlineKeyboardButton(text="🌡️ Тепловая карта",   callback_data="heatmap"),
+        InlineKeyboardButton(text="📈 Точность",         callback_data="prediction_accuracy"),
         InlineKeyboardButton(text="🤖 Автопилот",        callback_data="autopilot"),
     )
     builder.row(
@@ -130,11 +130,11 @@ def kb_stats() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="📈 Бэктестинг",         callback_data="compare"),
-        InlineKeyboardButton(text="🗂 Сессии",              callback_data="sessions"),
+        InlineKeyboardButton(text="🎯 Точность",           callback_data="prediction_accuracy"),
     )
     builder.row(
         InlineKeyboardButton(text="🔥 Горячая полоса",     callback_data="hot_streak"),
-        InlineKeyboardButton(text="🤖 Автопилот",          callback_data="autopilot"),
+        InlineKeyboardButton(text="🗂 Сессии",              callback_data="sessions"),
     )
     builder.row(
         InlineKeyboardButton(text="🔬 Калибровка",         callback_data="calibration"),

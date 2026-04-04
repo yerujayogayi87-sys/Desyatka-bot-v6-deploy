@@ -353,6 +353,16 @@ STRATEGY_NAMES_RU = {
     "momentum":    "Моментум",
 }
 
+DEFAULT_STRATEGY_PRIORS = {
+    "statistical": 0.06,
+    "ema":         0.40,
+    "serial":      0.07,
+    "markov":      0.23,
+    "zigzag":      0.10,
+    "temporal":    0.05,
+    "momentum":    0.15,
+}
+
 
 def _safe_strategy_scores(games: list[dict]) -> dict[str, ScoreMap]:
     scores: dict[str, ScoreMap] = {}
@@ -460,6 +470,64 @@ def prediction_strength(top_pred: dict) -> float:
     return round(max(0.0, min(strength, 99.0)), 1)
 
 
+def evaluate_history_predictions(
+    games: list[dict],
+    sample_sizes: tuple[int | None, ...] = (50, 100, None),
+) -> dict[str, dict]:
+    """
+    Честный walk-forward бэктест по уже набранной истории.
+    Используется для показа пользователю реальной точности без зависимости от БД логов.
+    """
+    if len(games) < 8:
+        return {}
+
+    chronological = list(reversed(games))
+    available = len(chronological) - 5
+    if available <= 0:
+        return {}
+
+    summaries: dict[str, dict] = {}
+    for sample in sample_sizes:
+        checks = min(sample or available, available)
+        if checks <= 0:
+            continue
+
+        start_idx = len(chronological) - checks
+        hit1 = hit3 = parity = 0
+        measured = 0
+
+        for idx in range(start_idx, len(chronological)):
+            if idx < 5:
+                continue
+            history = list(reversed(chronological[:idx]))
+            actual = chronological[idx]["result"]
+            preds = predict(history, dict(DEFAULT_STRATEGY_PRIORS), top_n=3)
+            if not preds:
+                continue
+            measured += 1
+            top_numbers = [p["number"] for p in preds[:3]]
+            hit1 += int(preds[0]["number"] == actual)
+            hit3 += int(actual in top_numbers)
+            parity += int((preds[0]["number"] % 2) == (actual % 2))
+
+        if measured <= 0:
+            continue
+
+        key = "all" if sample is None else str(sample)
+        summaries[key] = {
+            "label": "вся база" if sample is None else f"последние {sample}",
+            "checks": measured,
+            "top1": round(hit1 / measured * 100, 2),
+            "top3": round(hit3 / measured * 100, 2),
+            "parity": round(parity / measured * 100, 2),
+            "hit1": hit1,
+            "hit3": hit3,
+            "parity_hits": parity,
+        }
+
+    return summaries
+
+
 # ── Главный движок ────────────────────────────────────────────────────────────
 
 def predict(
@@ -481,10 +549,12 @@ def predict(
         return []
 
     w = dict(weights)
-    # Инициализируем дефолтные веса для всех стратегий
+    # Инициализируем веса с более полезным смещением к реально рабочим стратегиям.
     for s in STRATEGY_FNS:
         if s not in w:
-            w[s] = 1 / len(STRATEGY_FNS)
+            w[s] = DEFAULT_STRATEGY_PRIORS[s]
+        else:
+            w[s] *= DEFAULT_STRATEGY_PRIORS[s] / (1 / len(STRATEGY_FNS))
 
     # Пауза: гасим краткосрочные паттерны
     if pause_detected:
@@ -541,8 +611,14 @@ def predict(
         elif supporters >= n_strategies - 2: # 5 из 7
             combined[num] *= 1.08
 
-    # Softmax с temperature=0.7 (умереннее, чем 0.4 в v5)
-    softmaxed = _softmax(combined, temperature=0.7)
+    if h_ratio < 0.66 and len(games) >= 30:
+        temperature = 0.58
+    elif h_ratio < 0.82:
+        temperature = 0.64
+    else:
+        temperature = 0.74
+
+    softmaxed = _softmax(combined, temperature=temperature)
     ranked    = sorted(softmaxed.items(), key=lambda x: x[1], reverse=True)
     second_score = ranked[1][1] if len(ranked) > 1 else 0.0
 

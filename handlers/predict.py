@@ -5,10 +5,13 @@ from aiogram import Router
 from aiogram.types import CallbackQuery
 
 from database import get_games, get_weights, record_prediction, get_settings, is_allowed
-from strategies import predict, bet_recommendation, strategy_top_predictions
+from strategies import predict, bet_recommendation, strategy_top_predictions, evaluate_history_predictions
 from analytics import detect_pause, shannon_entropy
 from keyboards import kb_predict, kb_back_main
-from utils import fmt_pred, fmt_pred_detail, fmt_weights, fmt_entropy, fmt_advantage_summary
+from utils import (
+    fmt_pred, fmt_pred_brief, fmt_pred_detail, fmt_weights,
+    fmt_entropy, fmt_advantage_summary, fmt_accuracy_block,
+)
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -42,6 +45,7 @@ async def _make_prediction(uid: int, pause_override: bool = False) -> tuple[str,
 
     weights = get_weights(uid)
     preds   = predict(games, weights, top_n=3, pause_detected=pd)
+    accuracy = evaluate_history_predictions(games, sample_sizes=(50, 100))
 
     _record_prediction_set(uid, games, preds)
 
@@ -58,10 +62,11 @@ async def _make_prediction(uid: int, pause_override: bool = False) -> tuple[str,
     text = (
         f"🎯 *Прогноз · {n_games} игр в базе*\n"
         f"{pause_note}\n"
-        f"{fmt_pred(preds)}\n\n"
-        "ℹ️ *Прогноз всегда показывает топ-3 числа; решение по ставке смотри отдельно ниже.*\n\n"
+        f"{fmt_pred_brief(preds)}\n\n"
+        f"{fmt_accuracy_block(accuracy)}\n\n"
         f"💡 *Ставка:* {bet_rec}\n"
         f"{adv_summary}\n\n"
+        f"🔁 *Полный top-3:*\n{fmt_pred(preds)}\n\n"
         f"🌀 *Энтропия:* {fmt_entropy(H)}"
     )
     return text, pd

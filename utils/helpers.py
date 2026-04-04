@@ -88,6 +88,21 @@ def fmt_pred(preds: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def fmt_pred_brief(preds: list[dict]) -> str:
+    """Короткий формат: основной номер + 2 запасных."""
+    if not preds:
+        return "_Прогноз недоступен._"
+
+    top = preds[0]
+    reserves = " · ".join(ne(p["number"]) for p in preds[1:3]) or "—"
+    return (
+        f"🎯 *Основное число:* {ne(top['number'])}\n"
+        f"📦 *Запасные:* {reserves}\n"
+        f"📊 *Вероятность:* {top.get('probability', 0):.1f}% · "
+        f"Сила {top.get('strength', 0):.0f}/100"
+    )
+
+
 def fmt_pred_detail(preds: list[dict]) -> str:
     """
     Расширенный формат с детализацией по каждой стратегии.
@@ -167,3 +182,18 @@ def fmt_advantage_summary(preds: list[dict]) -> str:
         return "📊 Преимущество минимальное."
     else:
         return "📊 Явного преимущества нет — осторожнее."
+
+
+def fmt_accuracy_block(stats: dict[str, dict]) -> str:
+    """Компактный блок реальной точности по истории."""
+    if not stats:
+        return "_Точность пока не рассчитана._"
+
+    ordered_keys = [key for key in ("50", "100", "all") if key in stats]
+    lines = ["📈 *Реальная точность по базе:*"]
+    for key in ordered_keys:
+        row = stats[key]
+        lines.append(
+            f"• {row['label']}: top-1 {row['top1']:.1f}% · top-3 {row['top3']:.1f}% · ч/н {row['parity']:.1f}%"
+        )
+    return "\n".join(lines)

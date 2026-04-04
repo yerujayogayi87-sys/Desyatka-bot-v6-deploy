@@ -23,9 +23,9 @@ from analytics import (
     make_history_heatmap, make_strategy_radar,
     shannon_entropy,
 )
-from strategies import predict, bet_recommendation, prediction_strength
+from strategies import predict, bet_recommendation, prediction_strength, evaluate_history_predictions
 from keyboards import kb_stats, kb_back_main
-from utils import ne, bar, fmt_entropy
+from utils import ne, bar, fmt_entropy, fmt_accuracy_block
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -297,6 +297,41 @@ async def cb_compare(callback: CallbackQuery):
         pass
 
     text = "\n\n".join(lines)
+    try:
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb_stats())
+    except Exception:
+        await callback.message.answer(text, parse_mode="Markdown", reply_markup=kb_stats())
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "prediction_accuracy")
+async def cb_prediction_accuracy(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if not is_allowed(uid):
+        await callback.answer("🔒 Доступ закрыт.", show_alert=True)
+        return
+
+    games = get_games(uid)
+    if len(games) < 8:
+        await callback.answer("Нужно минимум 8 игр.", show_alert=True)
+        return
+
+    stats = evaluate_history_predictions(games, sample_sizes=(50, 100, None))
+    if not stats:
+        await callback.answer("Пока не удалось посчитать точность.", show_alert=True)
+        return
+
+    best_key = max(stats, key=lambda key: stats[key]["top1"])
+    best = stats[best_key]
+    text = (
+        "🎯 *Точность прогноза*\n\n"
+        f"{fmt_accuracy_block(stats)}\n\n"
+        f"🏆 Лучший срез: *{best['label']}*\n"
+        f"Точное число: *{best['top1']:.1f}%* ({best['hit1']}/{best['checks']})\n"
+        f"Top-3: *{best['top3']:.1f}%* ({best['hit3']}/{best['checks']})\n"
+        f"Паритет: *{best['parity']:.1f}%* ({best['parity_hits']}/{best['checks']})\n\n"
+        "_Расчёт идёт прямо по истории, без опоры на старые логи прогнозов._"
+    )
     try:
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb_stats())
     except Exception:

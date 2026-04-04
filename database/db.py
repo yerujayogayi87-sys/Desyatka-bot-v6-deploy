@@ -27,6 +27,15 @@ SNAPSHOT_LATEST_NAME = os.getenv("DB_SNAPSHOT_LATEST", "history_latest.json")
 SNAPSHOT_KEEP = int(os.getenv("DB_SNAPSHOT_KEEP", "8"))
 
 STRATEGIES = ["statistical", "ema", "serial", "markov", "zigzag", "temporal", "momentum"]
+DEFAULT_WEIGHT_PRIORS = {
+    "statistical": 0.06,
+    "ema":         0.40,
+    "serial":      0.07,
+    "markov":      0.23,
+    "zigzag":      0.10,
+    "temporal":    0.05,
+    "momentum":    0.15,
+}
 
 
 def _conn() -> sqlite3.Connection:
@@ -639,9 +648,10 @@ def get_weights(user_id: int) -> dict[str, float]:
         if s in rows and rows[s]["total"] >= 10:
             correct = rows[s]["correct"]
             total   = rows[s]["total"]
-            weights[s] = (correct + 1) / (total + 11)
+            empirical = (correct + 1) / (total + 11)
+            weights[s] = empirical * DEFAULT_WEIGHT_PRIORS.get(s, 1 / len(STRATEGIES))
         else:
-            weights[s] = 1 / 11
+            weights[s] = DEFAULT_WEIGHT_PRIORS.get(s, 1 / len(STRATEGIES))
 
     total_w = sum(weights.values()) or 1
     return {k: v / total_w for k, v in weights.items()}

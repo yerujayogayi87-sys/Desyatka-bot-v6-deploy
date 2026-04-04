@@ -20,7 +20,7 @@ from database import (
 from strategies import predict, bet_recommendation, strategy_top_predictions
 from analytics import get_alerts, detect_pause, shannon_entropy
 from keyboards import kb_number_input, kb_after_add, kb_pause_detected, kb_main_menu
-from utils import ne, fmt_pred, fmt_entropy
+from utils import ne, fmt_pred, fmt_pred_brief, fmt_entropy
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -233,6 +233,8 @@ async def _handle_bulk(message: Message, results: list):
         full_text = (
             confirm
             + "\n🎯 *Прогноз на следующую игру:*\n\n"
+            + fmt_pred_brief(preds)
+            + "\n\n🔁 *Top-3:*\n"
             + fmt_pred(preds)
             + f"\n\n💡 *Ставка:* {bet_rec}"
             + f"\n🌀 Энтропия: {fmt_entropy(H)}"
@@ -347,6 +349,8 @@ async def _send_add_result(callback, uid, result, new_id, total, game_number, ga
         full_text = (
             confirm
             + f"\n\n🎯 *Прогноз:*{pause_note}\n\n"
+            + fmt_pred_brief(preds)
+            + "\n\n🔁 *Top-3:*\n"
             + fmt_pred(preds)
             + f"\n\n💡 *Ставка:* {bet_rec}"
             + f"\n🌀 Энтропия: {fmt_entropy(H)}"
