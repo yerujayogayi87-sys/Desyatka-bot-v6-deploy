@@ -16,6 +16,7 @@ import json
 import shutil
 import secrets
 import string
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -163,7 +164,22 @@ def activate_token(user_id: int, token_str: str) -> dict:
     Активирует токен для пользователя.
     Возвращает {"ok": bool, "reason": str, "expires_at": str|None}
     """
-    token_str = token_str.strip().upper()
+    token_str = (token_str or "").strip().upper()
+
+    if _too_many_failed_activations(user_id):
+        _log_access(user_id, "token_rate_limited", "cooldown_15m")
+        return {
+            "ok": False,
+            "reason": "Слишком много неудачных попыток. Подождите 15 минут и попробуйте снова.",
+        }
+
+    if not _is_token_format_valid(token_str):
+        _log_access(user_id, "bad_token_format", token_str[:20])
+        return {
+            "ok": False,
+            "reason": "Неверный формат токена. Нужно 8 символов (буквы/цифры без пробелов).",
+        }
+
     con = _conn()
     cur = con.cursor()
     now = datetime.now()
@@ -228,6 +244,30 @@ def _gen_token(length: int = 8) -> str:
     # Исключаем похожие символы: O/0, I/1, S/5
     alphabet = "ABCDEFGHJKLMNPQRTUVWXYZ23456789"
     return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+TOKEN_PATTERN = re.compile(r"^[A-Z0-9]{8}$")
+
+
+def _is_token_format_valid(token_str: str) -> bool:
+    return bool(TOKEN_PATTERN.fullmatch(token_str))
+
+
+def _too_many_failed_activations(user_id: int, limit: int = 8, window_minutes: int = 15) -> bool:
+    """Защита от перебора: блок после N неудачных активаций за окно."""
+    cutoff = (datetime.now() - timedelta(minutes=window_minutes)).isoformat(timespec="seconds")
+    con = _conn()
+    cur = con.cursor()
+    cur.execute(
+        """SELECT COUNT(*) AS c FROM access_log
+           WHERE user_id=? AND at>=? AND action IN (
+               'bad_token', 'bad_token_format', 'used_token', 'expired_token'
+           )""",
+        (user_id, cutoff),
+    )
+    row = cur.fetchone()
+    con.close()
+    return int(row["c"] or 0) >= limit
 
 
 def create_token(created_by: int, days: int = 1, note: str = "") -> dict:
@@ -332,7 +372,7 @@ def add_game(user_id: int, result: int, game_number: str = "") -> int:
          now.isoformat(timespec="seconds"), now.hour, now.weekday()),
     )
     con.commit()
-    row_id = cur.lastrowid
+    row_id = int(cur.lastrowid or 0)
     con.close()
     return row_id
 
@@ -348,7 +388,7 @@ def add_games_bulk(user_id: int, results: list[int]) -> list[int]:
                VALUES (?,?,?,?,?,?)""",
             (user_id, "", r, now.isoformat(timespec="seconds"), now.hour, now.weekday()),
         )
-        ids.append(cur.lastrowid)
+        ids.append(int(cur.lastrowid or 0))
     con.commit()
     con.close()
     return ids

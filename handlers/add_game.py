@@ -7,6 +7,7 @@ handlers/add_game.py — добавление игры v6.
 """
 
 import logging
+import re
 from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -20,10 +21,11 @@ from database import (
 from strategies import predict, bet_recommendation, strategy_top_predictions
 from analytics import get_alerts, detect_pause, shannon_entropy
 from keyboards import kb_number_input, kb_after_add, kb_pause_detected, kb_main_menu
-from utils import ne, fmt_pred, fmt_pred_brief, fmt_entropy
+from utils import ne, fmt_pred_compact, fmt_pred_brief, fmt_entropy
 
 log = logging.getLogger(__name__)
 router = Router()
+QUICK_ADD_RE = re.compile(r"^\+\s*([0-9\s]+)$")
 
 
 class AddGame(StatesGroup):
@@ -53,6 +55,25 @@ def _extract_game_number(raw: str):
         return None
 
 
+def _normalize_game_number(raw: str) -> tuple[str, str | None]:
+    """Возвращает (нормализованный_номер, ошибка)."""
+    text = (raw or "").strip()
+    if text == ".":
+        return "", None
+
+    value = text.lstrip("#").strip()
+    if not value:
+        return "", None
+
+    if not value.isdigit():
+        return "", "Номер игры должен содержать только цифры (например, `1234`) или `.` для пропуска."
+
+    if len(value) > 12:
+        return "", "Номер игры слишком длинный (максимум 12 цифр)."
+
+    return value, None
+
+
 @router.callback_query(lambda c: c.data == "add_game")
 async def cb_add_game(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
@@ -60,39 +81,22 @@ async def cb_add_game(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Нет доступа.", show_alert=True)
         return
 
-    games    = get_games(uid, limit=1)
-    last_num = _extract_game_number(games[0]["game_number"] if games else "")
-
-    if last_num is not None:
-        proposed = str(last_num + 1)
-        await state.set_state(AddGame.confirm_next_game_num)
-        await state.update_data(proposed_game_num=proposed)
-        try:
-            await callback.message.edit_text(
-                f"➕ *Добавление игры*\n\nСледующая игра: *№{proposed}*?",
-                parse_mode="Markdown",
-                reply_markup=kb_confirm_next_num(proposed),
-            )
-        except Exception:
-            await callback.message.answer(
-                f"➕ Следующая игра: *№{proposed}*?",
-                parse_mode="Markdown",
-                reply_markup=kb_confirm_next_num(proposed),
-            )
-    else:
-        await state.set_state(AddGame.waiting_game_number)
-        try:
-            await callback.message.edit_text(
-                "➕ *Добавление игры*\n\n"
-                "Введи номер игры (например, `1234`) или `.` для пропуска.\n\n"
-                "💡 *Быстрый ввод нескольких результатов:* `3 7 2 5 1`",
-                parse_mode="Markdown",
-            )
-        except Exception:
-            await callback.message.answer(
-                "➕ Введи номер игры или `.` для пропуска:",
-                parse_mode="Markdown",
-            )
+    await state.set_state(AddGame.waiting_result)
+    await state.update_data(game_number="")
+    try:
+        await callback.message.edit_text(
+            "➕ *Быстрый ввод*\n\n"
+            "Отправь сразу числа через пробел: `3 7 2 5 1`\n"
+            "Или одно число `0..10`.",
+            parse_mode="Markdown",
+            reply_markup=kb_number_input(),
+        )
+    except Exception:
+        await callback.message.answer(
+            "➕ Отправь числа через пробел (`3 7 2 5 1`) или одно число `0..10`.",
+            parse_mode="Markdown",
+            reply_markup=kb_number_input(),
+        )
     await callback.answer()
 
 
@@ -172,7 +176,13 @@ async def got_game_number(message: Message, state: FSMContext):
         await state.clear()
         await _handle_bulk(message, bulk)
         return
-    await state.update_data(game_number="" if text == "." else text)
+
+    game_number, err = _normalize_game_number(text)
+    if err:
+        await message.answer(err, parse_mode="Markdown")
+        return
+
+    await state.update_data(game_number=game_number)
     await state.set_state(AddGame.waiting_result)
     await message.answer("🎲 Какое число выпало? Нажми кнопку:",
                          reply_markup=kb_number_input())
@@ -195,7 +205,7 @@ async def got_result_text(message: Message, state: FSMContext):
 
 def _parse_bulk(text: str):
     parts = text.split()
-    if len(parts) < 2:
+    if len(parts) < 1:
         return None
     try:
         nums = [int(p) for p in parts]
@@ -204,6 +214,28 @@ def _parse_bulk(text: str):
     except ValueError:
         pass
     return None
+
+
+def _parse_quick_add(text: str):
+    m = QUICK_ADD_RE.match((text or "").strip())
+    if not m:
+        return None
+    return _parse_bulk(m.group(1))
+
+
+@router.message(lambda m: bool(m.text and m.text.strip().startswith("+")))
+async def quick_add_from_anywhere(message: Message, state: FSMContext):
+    """Быстрое добавление из любого экрана: + 3 7 2 5"""
+    uid = message.from_user.id
+    if not is_allowed(uid):
+        return
+
+    nums = _parse_quick_add(message.text or "")
+    if nums is None:
+        return
+
+    await state.clear()
+    await _handle_bulk(message, nums)
 
 
 async def _handle_bulk(message: Message, results: list):
@@ -232,10 +264,10 @@ async def _handle_bulk(message: Message, results: list):
 
         full_text = (
             confirm
-            + "\n🎯 *Прогноз на следующую игру:*\n\n"
+            + "\n🎯 *Прогноз:*\n"
             + fmt_pred_brief(preds)
             + "\n\n🔁 *Top-3:*\n"
-            + fmt_pred(preds)
+            + fmt_pred_compact(preds)
             + f"\n\n💡 *Ставка:* {bet_rec}"
             + f"\n🌀 Энтропия: {fmt_entropy(H)}"
             + alert_text
@@ -351,7 +383,7 @@ async def _send_add_result(callback, uid, result, new_id, total, game_number, ga
             + f"\n\n🎯 *Прогноз:*{pause_note}\n\n"
             + fmt_pred_brief(preds)
             + "\n\n🔁 *Top-3:*\n"
-            + fmt_pred(preds)
+            + fmt_pred_compact(preds)
             + f"\n\n💡 *Ставка:* {bet_rec}"
             + f"\n🌀 Энтропия: {fmt_entropy(H)}"
             + alert_text
@@ -376,8 +408,9 @@ async def _send_add_result(callback, uid, result, new_id, total, game_number, ga
 def _record_all_preds(uid: int, preds: list):
     if not preds:
         return
-    for p in preds:
-        record_prediction(uid, "combined", p["number"])
+    if preds[0].get("tradable"):
+        for p in preds:
+            record_prediction(uid, "combined", p["number"])
 
 
 def _record_strategy_preds(uid: int, games: list[dict]):

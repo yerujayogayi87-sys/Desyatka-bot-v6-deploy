@@ -53,6 +53,45 @@ def _uniform() -> ScoreMap:
     return {i: UNIFORM for i in NUMS}
 
 
+def _recency_anchor(games: list[dict], window: int = 24, half_life: int = 10) -> ScoreMap:
+    """
+    Стабилизирующее распределение по последним играм.
+    Используется как небольшой якорь, чтобы снизить шум переобучения ансамбля.
+    """
+    if not games:
+        return _uniform()
+
+    subset = games[: min(window, len(games))]
+    scores = {i: 0.0 for i in NUMS}
+    for idx, game in enumerate(subset):
+        decay = math.exp(-idx * math.log(2) / max(half_life, 1))
+        scores[game["result"]] += decay
+    return _normalize(scores)
+
+
+def _calibrate_distribution(raw_scores: ScoreMap, games: list[dict], h_ratio: float) -> ScoreMap:
+    """
+    Калибровка итогового распределения: мягко тянем к равномерному,
+    когда данных мало или последовательность близка к случайной.
+    """
+    n = len(games)
+    if n <= 0:
+        return _uniform()
+
+    sample_factor = min(n / 40.0, 1.0)
+    entropy_factor = max(0.0, min((h_ratio - 0.70) / 0.25, 1.0))
+
+    # Чем выше энтропия и меньше выборка, тем сильнее shrink к uniform.
+    shrink = 0.02 + 0.18 * (1.0 - sample_factor) + 0.12 * entropy_factor
+    shrink = min(max(shrink, 0.02), 0.30)
+
+    calibrated = {
+        num: raw_scores.get(num, 0.0) * (1.0 - shrink) + UNIFORM * shrink
+        for num in NUMS
+    }
+    return _normalize(calibrated)
+
+
 WINDOW_BLEND = {
     "statistical": (0.25, 0.35, 0.40),
     "ema":         (0.50, 0.30, 0.20),
@@ -418,30 +457,41 @@ def _recent_strategy_weight_adjustment(games: list[dict], lookback: int = 28) ->
         return {key: 1.0 for key in STRATEGY_FNS}
 
     n_checks = min(lookback, len(games) - 6)
-    stats = {key: {"correct": 0, "total": 0} for key in STRATEGY_FNS}
+    stats = {key: {"nll_sum": 0.0, "hits": 0, "total": 0} for key in STRATEGY_FNS}
 
     for offset in range(n_checks):
         hist = games[offset + 1 :]
         if len(hist) < 8:
             break
         actual = games[offset]["result"]
-        strat_preds = strategy_top_predictions(hist)
-        for key, predicted in strat_preds.items():
+        strat_scores = _safe_strategy_scores(hist)
+        for key, smap in strat_scores.items():
+            p = max(smap.get(actual, UNIFORM), 1e-9)
+            stats[key]["nll_sum"] += -math.log(p)
+            top_num = max(smap.items(), key=lambda item: item[1])[0]
+            stats[key]["hits"] += int(top_num == actual)
             stats[key]["total"] += 1
-            if predicted == actual:
-                stats[key]["correct"] += 1
 
     adjusted = {}
+    # NLL равномерного предсказания для 11 чисел.
+    uniform_nll = math.log(11)
+    max_total = max(n_checks, 1)
     for key, data in stats.items():
         total = data["total"]
         if total <= 0:
             adjusted[key] = 1.0
             continue
-        # Сглаженная точность вокруг случайной базы 1/11.
-        hit_rate = (data["correct"] + 1) / (total + 11)
-        baseline = 1 / 11
-        relative = hit_rate / baseline
-        adjusted[key] = min(max(relative, 0.65), 1.55)
+        avg_nll = data["nll_sum"] / max(total, 1)
+        # skill_prob > 1 лучше uniform, <1 хуже uniform.
+        skill_prob = math.exp(uniform_nll - avg_nll)
+        hit_rate = (data["hits"] + 1) / (total + 11)
+        skill_hit = hit_rate / (1 / 11)
+        relative = skill_prob * 0.65 + skill_hit * 0.35
+
+        confidence = min(total / max_total, 1.0)
+        damp = 0.35 + 0.65 * confidence
+        tuned = 1.0 + (relative - 1.0) * damp
+        adjusted[key] = min(max(tuned, 0.80), 1.35)
 
     return adjusted
 
@@ -468,6 +518,106 @@ def prediction_strength(top_pred: dict) -> float:
     spread_component = min(max(spread, 0.0), 1.0) * 42.0
     strength = (support_component + lift_component + spread_component) * entropy_factor
     return round(max(0.0, min(strength, 99.0)), 1)
+
+
+def _detect_regime(h_ratio: float, n_games: int, pause_detected: bool) -> str:
+    if pause_detected:
+        return "reset"
+    if n_games < 12:
+        return "cold_start"
+    if h_ratio >= 0.90:
+        return "noise"
+    if h_ratio >= 0.78:
+        return "mixed"
+    return "structured"
+
+
+def _regime_risk_factor(regime: str) -> float:
+    return {
+        "structured": 1.00,
+        "mixed": 0.80,
+        "noise": 0.58,
+        "reset": 0.52,
+        "cold_start": 0.62,
+    }.get(regime, 0.75)
+
+
+def _trade_gate(
+    *,
+    regime: str,
+    games_count: int,
+    effective_advantage: float,
+    strength: float,
+    supporters: int,
+    probability_pct: float,
+) -> tuple[bool, str, float]:
+    """Решение: есть ли сделка, и какая доля ставки допустима."""
+    if games_count < 12:
+        return False, "мало данных", 0.0
+
+    if regime in {"noise", "reset", "cold_start"}:
+        min_edge, min_strength, min_support = 12.0, 18.0, 5
+    elif regime == "mixed":
+        min_edge, min_strength, min_support = 9.0, 14.0, 4
+    else:
+        min_edge, min_strength, min_support = 6.0, 10.0, 3
+
+    if probability_pct < 10.2:
+        return False, "близко к случайному", 0.0
+    if effective_advantage < min_edge:
+        return False, "недостаточный edge", 0.0
+    if strength < min_strength:
+        return False, "слабый сигнал", 0.0
+    if supporters < min_support:
+        return False, "нет консенсуса", 0.0
+
+    edge_part = min(max((effective_advantage - min_edge) / 16.0, 0.0), 1.0)
+    strength_part = min(max((strength - min_strength) / 26.0, 0.0), 1.0)
+    support_part = min(max((supporters - min_support) / 3.0, 0.0), 1.0)
+
+    stake_factor = 0.25 + 0.45 * edge_part + 0.20 * strength_part + 0.10 * support_part
+    return True, "сигнал подтверждён", round(min(max(stake_factor, 0.20), 1.0), 2)
+
+
+def _build_market_views(probs: ScoreMap) -> dict:
+    even_prob = sum(v for n, v in probs.items() if n % 2 == 0)
+    odd_prob = 1.0 - even_prob
+
+    low_prob = sum(v for n, v in probs.items() if n <= 3)
+    mid_prob = sum(v for n, v in probs.items() if 4 <= n <= 7)
+    high_prob = sum(v for n, v in probs.items() if n >= 8)
+
+    parity_side = "чет" if even_prob >= odd_prob else "нечет"
+    parity_conf = max(even_prob, odd_prob)
+
+    zone_map = {"низ": low_prob, "середина": mid_prob, "верх": high_prob}
+    zone_side, zone_conf = max(zone_map.items(), key=lambda item: item[1])
+
+    return {
+        "parity_side": parity_side,
+        "parity_prob": round(parity_conf * 100, 1),
+        "zone_side": zone_side,
+        "zone_prob": round(zone_conf * 100, 1),
+    }
+
+
+def _select_signal_mode(top_pred: dict) -> tuple[str, str]:
+    regime = top_pred.get("regime", "mixed")
+    tradable = bool(top_pred.get("tradable", False))
+    eff_adv = float(top_pred.get("effective_advantage", 0.0))
+    prob = float(top_pred.get("probability", 0.0))
+    parity_prob = float(top_pred.get("parity_prob", 0.0))
+    zone_prob = float(top_pred.get("zone_prob", 0.0))
+
+    if tradable and eff_adv >= 12 and prob >= 14.0:
+        return "number", "сильный edge по точному числу"
+    if zone_prob >= 43.0 and regime in {"mixed", "noise", "cold_start"}:
+        return "zone", "число шумит, зона стабильнее"
+    if parity_prob >= 56.0:
+        return "parity", "по чет/нечет сигнал стабильнее"
+    if tradable:
+        return "number", "точечный сигнал проходит фильтр"
+    return "skip", "нет подтвержденного преимущества"
 
 
 def evaluate_history_predictions(
@@ -528,6 +678,134 @@ def evaluate_history_predictions(
     return summaries
 
 
+def _prepare_base_weights(weights: dict[str, float]) -> dict[str, float]:
+    """Приводит входные веса к общему baseline стратегий."""
+    w = dict(weights)
+    baseline = 1 / len(STRATEGY_FNS)
+    for key in STRATEGY_FNS:
+        if key not in w:
+            w[key] = DEFAULT_STRATEGY_PRIORS[key]
+        else:
+            w[key] *= DEFAULT_STRATEGY_PRIORS[key] / baseline
+    return w
+
+
+def _apply_regime_weight_rules(
+    w: dict[str, float],
+    *,
+    h_ratio: float,
+    pause_detected: bool,
+) -> dict[str, float]:
+    """Доменные правила усиления/ослабления стратегий по режиму серии."""
+    tuned = dict(w)
+    if pause_detected:
+        for key in ("serial", "markov", "zigzag", "momentum"):
+            tuned[key] = tuned.get(key, 0.0) * 0.12
+        tuned["ema"] = tuned.get("ema", 0.0) * 0.4
+
+    if h_ratio < 0.60 and not pause_detected:
+        tuned["serial"] = tuned.get("serial", 0.0) * 1.75
+        tuned["markov"] = tuned.get("markov", 0.0) * 1.75
+        tuned["momentum"] = tuned.get("momentum", 0.0) * 1.3
+    elif h_ratio > 0.88:
+        tuned["serial"] = tuned.get("serial", 0.0) * 0.45
+        tuned["markov"] = tuned.get("markov", 0.0) * 0.45
+        tuned["zigzag"] = tuned.get("zigzag", 0.0) * 0.55
+        tuned["statistical"] = tuned.get("statistical", 0.0) * 1.5
+        tuned["ema"] = tuned.get("ema", 0.0) * 1.35
+
+    return tuned
+
+
+def _normalize_weights(weights: dict[str, float]) -> dict[str, float]:
+    total = sum(weights.values()) or 1.0
+    return {k: v / total for k, v in weights.items()}
+
+
+def _combine_scores(strat_scores: dict[str, ScoreMap], norm_w: dict[str, float]) -> ScoreMap:
+    combined = {num: 0.0 for num in NUMS}
+    for num in NUMS:
+        combined[num] = sum(norm_w.get(key, 0.0) * smap.get(num, 0.0) for key, smap in strat_scores.items())
+    return combined
+
+
+def _apply_consensus_boost(combined: ScoreMap, strat_scores: dict[str, ScoreMap], norm_w: dict[str, float]) -> ScoreMap:
+    boosted = dict(combined)
+    n_strategies = len(STRATEGY_FNS)
+    for num in NUMS:
+        supporters = sum(1 for smap in strat_scores.values() if smap.get(num, 0.0) > UNIFORM * 1.4)
+        weighted_support = sum(
+            norm_w.get(key, 0.0)
+            for key, smap in strat_scores.items()
+            if smap.get(num, 0.0) > UNIFORM * 1.25
+        )
+        if supporters >= n_strategies - 1:
+            boosted[num] *= 1.20
+        elif supporters >= n_strategies - 2:
+            boosted[num] *= 1.08
+        if weighted_support >= 0.72:
+            boosted[num] *= 1.06
+    return boosted
+
+
+def _blend_anchor(combined: ScoreMap, games: list[dict], h_ratio: float) -> ScoreMap:
+    anchor = _recency_anchor(games, window=24, half_life=10)
+    if h_ratio > 0.86:
+        anchor_mix = 0.12
+    elif h_ratio > 0.75:
+        anchor_mix = 0.08
+    else:
+        anchor_mix = 0.04
+    mixed = {
+        num: combined.get(num, 0.0) * (1.0 - anchor_mix) + anchor[num] * anchor_mix
+        for num in NUMS
+    }
+    return _normalize(mixed)
+
+
+def _pick_temperature(h_ratio: float, n_games: int) -> float:
+    if h_ratio < 0.66 and n_games >= 30:
+        return 0.58
+    if h_ratio < 0.82:
+        return 0.64
+    return 0.74
+
+
+def _diversify_ranked(ranked: list[tuple[int, float]], top_n: int) -> list[tuple[int, float]]:
+    """Диверсифицирует хвост top-N, сохраняя исходный top-1."""
+    if not ranked or top_n <= 1:
+        return ranked
+
+    def _zone(num: int) -> str:
+        return "L" if num <= 3 else ("H" if num >= 8 else "M")
+
+    selected = [ranked[0]]
+    pool = ranked[1: min(8, len(ranked))]
+    while pool and len(selected) < top_n:
+        best_idx = 0
+        best_score = -1.0
+        for idx, (num, score) in enumerate(pool):
+            adjusted_score = score
+            for chosen_num, _ in selected:
+                if num % 2 == chosen_num % 2:
+                    adjusted_score *= 0.94
+                if _zone(num) == _zone(chosen_num):
+                    adjusted_score *= 0.92
+            if adjusted_score > best_score:
+                best_score = adjusted_score
+                best_idx = idx
+        selected.append(pool.pop(best_idx))
+
+    if len(selected) < top_n:
+        for item in ranked:
+            if item not in selected:
+                selected.append(item)
+            if len(selected) >= top_n:
+                break
+
+    return selected + [item for item in ranked if item not in selected]
+
+
 # ── Главный движок ────────────────────────────────────────────────────────────
 
 def predict(
@@ -548,79 +826,37 @@ def predict(
     if not games:
         return []
 
-    w = dict(weights)
-    # Инициализируем веса с более полезным смещением к реально рабочим стратегиям.
-    for s in STRATEGY_FNS:
-        if s not in w:
-            w[s] = DEFAULT_STRATEGY_PRIORS[s]
-        else:
-            w[s] *= DEFAULT_STRATEGY_PRIORS[s] / (1 / len(STRATEGY_FNS))
-
-    # Пауза: гасим краткосрочные паттерны
-    if pause_detected:
-        for s in ("serial", "markov", "zigzag", "momentum"):
-            w[s] = w.get(s, 0) * 0.12
-        w["ema"] = w.get("ema", 0) * 0.4
-
     # Энтропия-адаптация
     H       = shannon_entropy(games, window=min(25, len(games)))
     max_H   = math.log2(11)
     h_ratio = H / max_H
 
-    if h_ratio < 0.60 and not pause_detected:
-        # Паттерн предсказуем → усиливаем серийные
-        w["serial"]  = w.get("serial",  0) * 1.6
-        w["markov"]  = w.get("markov",  0) * 1.6
-        w["momentum"] = w.get("momentum", 0) * 1.3
-    elif h_ratio > 0.88:
-        # Хаос → доверяем статистике
-        w["serial"]      = w.get("serial",      0) * 0.45
-        w["markov"]      = w.get("markov",       0) * 0.45
-        w["zigzag"]      = w.get("zigzag",       0) * 0.55
-        w["statistical"] = w.get("statistical",  0) * 1.5
-        w["ema"]         = w.get("ema",          0) * 1.35
-
+    w = _prepare_base_weights(weights)
+    w = _apply_regime_weight_rules(w, h_ratio=h_ratio, pause_detected=pause_detected)
     recent_adj = _recent_strategy_weight_adjustment(games)
     for key, factor in recent_adj.items():
         w[key] = w.get(key, 0.0) * factor
-
-    # Нормализуем веса
-    w_total = sum(w.values()) or 1
-    norm_w  = {k: v / w_total for k, v in w.items()}
+    norm_w = _normalize_weights(w)
 
     # Вычисляем скоры каждой стратегии
     strat_scores = _safe_strategy_scores(games)
 
-    # Взвешенная сумма
-    combined: dict[int, float] = {}
-    for num in NUMS:
-        total_score = 0.0
-        for key, smap in strat_scores.items():
-            total_score += norm_w.get(key, 0.0) * smap.get(num, 0)
-        combined[num] = total_score
+    combined = _combine_scores(strat_scores, norm_w)
+    combined = _apply_consensus_boost(combined, strat_scores, norm_w)
+    combined = _blend_anchor(combined, games, h_ratio)
+    combined = _calibrate_distribution(combined, games, h_ratio)
 
-    # Agreement boost: только при консенсусе 5+ из 7 стратегий
-    n_strategies = len(STRATEGY_FNS)
-    for num in NUMS:
-        supporters = sum(
-            1 for key, smap in strat_scores.items()
-            if smap.get(num, 0) > UNIFORM * 1.4
-        )
-        if supporters >= n_strategies - 1:   # 6 из 7
-            combined[num] *= 1.20
-        elif supporters >= n_strategies - 2: # 5 из 7
-            combined[num] *= 1.08
-
-    if h_ratio < 0.66 and len(games) >= 30:
-        temperature = 0.58
-    elif h_ratio < 0.82:
-        temperature = 0.64
-    else:
-        temperature = 0.74
+    temperature = _pick_temperature(h_ratio, len(games))
 
     softmaxed = _softmax(combined, temperature=temperature)
     ranked    = sorted(softmaxed.items(), key=lambda x: x[1], reverse=True)
+    regime = _detect_regime(h_ratio, len(games), pause_detected)
+    regime_factor = _regime_risk_factor(regime)
+    market_views = _build_market_views(softmaxed)
+
+    ranked = _diversify_ranked(ranked, top_n)
     second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    n_strategies = len(STRATEGY_FNS)
 
     results = []
     for num, score in ranked[:top_n]:
@@ -640,20 +876,36 @@ def predict(
         score_gap = max(score - second_score, 0.0)
         spread = score_gap / max(score, 1e-9)
 
+        support_ratio = supporters / max(n_strategies, 1)
+        stability_factor = min(max(0.50 + 0.35 * support_ratio + 0.25 * spread, 0.40), 1.0)
+        effective_advantage = round(advantage_pct * stability_factor * regime_factor, 1)
+
+        strength_val = prediction_strength({
+            "advantage": advantage_pct,
+            "supporters": supporters,
+            "h_ratio": h_ratio,
+            "lift": lift,
+            "spread": spread,
+        })
+        probability_pct = round(score * 100, 1)
+        tradable, trade_reason, stake_factor = _trade_gate(
+            regime=regime,
+            games_count=len(games),
+            effective_advantage=effective_advantage,
+            strength=strength_val,
+            supporters=supporters,
+            probability_pct=probability_pct,
+        )
+
         explanation = _build_explanation(num, games, strat_scores, norm_w, h_ratio, H)
 
         results.append({
             "number":          num,
             "score":           score,
-            "probability":     round(score * 100, 1),   # реальная вероятность %
+            "probability":     probability_pct,   # реальная вероятность %
             "advantage":       advantage_pct,            # преимущество над случайным
-            "strength":        prediction_strength({
-                "advantage": advantage_pct,
-                "supporters": supporters,
-                "h_ratio": h_ratio,
-                "lift": lift,
-                "spread": spread,
-            }),
+            "effective_advantage": effective_advantage,  # риск-скорректированное преимущество
+            "strength":        strength_val,
             "lift":            round(lift, 2),
             "score_gap":       round(score_gap, 4),
             "spread":          round(spread, 3),
@@ -662,7 +914,21 @@ def predict(
             "entropy":         round(H, 2),
             "supporters":      supporters,
             "h_ratio":         round(h_ratio, 2),
+            "regime":          regime,
+            "tradable":        tradable,
+            "trade_reason":    trade_reason,
+            "stake_factor":    stake_factor,
+            "parity_side":     market_views["parity_side"],
+            "parity_prob":     market_views["parity_prob"],
+            "zone_side":       market_views["zone_side"],
+            "zone_prob":       market_views["zone_prob"],
         })
+
+    if results:
+        mode, mode_reason = _select_signal_mode(results[0])
+        for row in results:
+            row["signal_mode"] = mode
+            row["signal_mode_reason"] = mode_reason
 
     return results
 
@@ -730,19 +996,26 @@ def bet_recommendation(top_pred: dict, weights: dict) -> str:
     Рекомендация основана на реальном преимуществе над случайным.
     Убраны завышенные пороги v5.
     """
-    adv        = top_pred.get("advantage", 0)
+    adv        = top_pred.get("effective_advantage", top_pred.get("advantage", 0))
     strength   = top_pred.get("strength", prediction_strength(top_pred))
     lift       = top_pred.get("lift", 1.0)
     supporters = top_pred.get("supporters", 0)
+    regime     = top_pred.get("regime", "mixed")
+    tradable   = bool(top_pred.get("tradable", False))
+    stake_factor = float(top_pred.get("stake_factor", 0.0))
 
     n_strats   = len(STRATEGY_FNS)
     consensus  = supporters >= n_strats - 2   # 5 из 7
 
-    if strength >= 26 and adv >= 22 and consensus and lift >= 1.65:
+    if not tradable:
+        reason = top_pred.get("trade_reason", "сигнал не прошёл фильтр")
+        return f"🔴 Пропустить — {reason}"
+
+    if strength >= 26 and adv >= 22 and consensus and lift >= 1.65 and stake_factor >= 0.70:
         return "🟢 Уверенная — сильный консенсус стратегий"
-    elif strength >= 15 and adv >= 12 and (supporters >= 4 or lift >= 1.35):
-        return "🟡 Осторожная — умеренный сигнал"
-    elif strength >= 7 and adv >= 6:
-        return "🟠 Слабая — сигнал минимален, минимальная ставка"
+    elif strength >= 15 and adv >= 12 and (supporters >= 4 or lift >= 1.35) and stake_factor >= 0.45:
+        return "🟡 Рабочая — умеренный сигнал"
+    elif strength >= 10 and adv >= 7:
+        return "🟠 Ограниченная — только минимальная доля"
     else:
         return "🔴 Пропустить — стратегии не согласованы"

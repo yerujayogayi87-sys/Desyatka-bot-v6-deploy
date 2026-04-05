@@ -55,6 +55,9 @@ def kb_predict() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="📈 Точность",         callback_data="prediction_accuracy"),
+        InlineKeyboardButton(text="🔍 Аудит",            callback_data="predict_audit"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🤖 Автопилот",        callback_data="autopilot"),
     )
     builder.row(

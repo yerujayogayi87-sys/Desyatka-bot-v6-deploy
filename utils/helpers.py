@@ -57,7 +57,7 @@ def fmt_pred(preds: list[dict]) -> str:
     for i, p in enumerate(preds):
         m    = medals[i] if i < len(medals) else "  "
         prob = p.get("probability", p.get("score", 0) * 100)
-        adv  = p.get("advantage", 0)
+        adv  = p.get("effective_advantage", p.get("advantage", 0))
         strength = p.get("strength", 0)
         lift = p.get("lift", 1.0)
         sup  = p.get("supporters", 0)
@@ -95,12 +95,64 @@ def fmt_pred_brief(preds: list[dict]) -> str:
 
     top = preds[0]
     reserves = " · ".join(ne(p["number"]) for p in preds[1:3]) or "—"
+    tradable = "да" if top.get("tradable") else "нет"
+    stake_pct = int(float(top.get("stake_factor", 0.0)) * 100)
+    if not top.get("tradable"):
+        return (
+            "🚫 *Сигнал:* не подтверждён (ставка не рекомендуется)\n"
+            f"👀 *Кандидат для наблюдения:* {ne(top['number'])}\n"
+            f"📦 *Альтернативы:* {reserves}\n"
+            f"📊 *Вероятность:* {top.get('probability', 0):.1f}% · "
+            f"Сила {top.get('strength', 0):.0f}/100\n"
+            f"🛡 *Фильтр сделки:* {tradable} · доля {stake_pct}%"
+        )
     return (
         f"🎯 *Основное число:* {ne(top['number'])}\n"
         f"📦 *Запасные:* {reserves}\n"
         f"📊 *Вероятность:* {top.get('probability', 0):.1f}% · "
-        f"Сила {top.get('strength', 0):.0f}/100"
+        f"Сила {top.get('strength', 0):.0f}/100\n"
+        f"🛡 *Фильтр сделки:* {tradable} · доля {stake_pct}%"
     )
+
+
+def fmt_pred_compact(preds: list[dict]) -> str:
+    """Короткий top-3 без длинных пояснений."""
+    if not preds:
+        return "_Нет сигнала._"
+
+    lines = []
+    for i, p in enumerate(preds[:3], start=1):
+        adv = p.get("effective_advantage", p.get("advantage", 0))
+        marker = "✅" if p.get("tradable") else "⛔"
+        lines.append(
+            f"{i}) {marker} {ne(p['number'])} · {p.get('probability', 0):.1f}% · edge {adv:.1f}%"
+        )
+    return "\n".join(lines)
+
+
+def fmt_action_plan(preds: list[dict]) -> str:
+    """Короткий actionable-блок: что делать прямо сейчас."""
+    if not preds:
+        return "🧭 *Действие:* ждать данные"
+
+    top = preds[0]
+    mode = top.get("signal_mode", "skip")
+    mode_reason = top.get("signal_mode_reason", "")
+
+    if mode == "number":
+        stake = int(float(top.get("stake_factor", 0.0)) * 100)
+        return f"🧭 *Действие:* число {ne(top['number'])} · доля {stake}% банка"
+    if mode == "zone":
+        return (
+            f"🧭 *Действие:* зона *{top.get('zone_side', '—')}* "
+            f"({top.get('zone_prob', 0):.1f}%)"
+        )
+    if mode == "parity":
+        return (
+            f"🧭 *Действие:* *{top.get('parity_side', '—')}* "
+            f"({top.get('parity_prob', 0):.1f}%)"
+        )
+    return f"🧭 *Действие:* пропуск · {mode_reason}"
 
 
 def fmt_pred_detail(preds: list[dict]) -> str:
@@ -116,7 +168,7 @@ def fmt_pred_detail(preds: list[dict]) -> str:
     for i, p in enumerate(preds):
         m    = medals[i] if i < len(medals) else "  "
         prob = p.get("probability", 0)
-        adv  = p.get("advantage", 0)
+        adv  = p.get("effective_advantage", p.get("advantage", 0))
         strength = p.get("strength", 0)
         lift = p.get("lift", 1.0)
         sup  = p.get("supporters", 0)
@@ -133,6 +185,7 @@ def fmt_pred_detail(preds: list[dict]) -> str:
         lines.append(
             f"{m} *{ne(p['number'])}* — {prob:.1f}% · {adv_str}\n"
             f"   Сила {strength:.0f}/100 · Lift ×{lift:.2f} · {sup}/{n_s} стратегий\n"
+            f"   Сделка: {'да' if p.get('tradable') else 'нет'} · доля {int(float(p.get('stake_factor',0))*100)}%\n"
             f"   `{strat_line}`\n"
             f"   _{p['explanation']}_"
         )
@@ -173,7 +226,7 @@ def fmt_advantage_summary(preds: list[dict]) -> str:
     if not preds:
         return ""
     best = preds[0]
-    adv  = best.get("advantage", 0)
+    adv  = best.get("effective_advantage", best.get("advantage", 0))
     if adv >= 20:
         return "📊 Преимущество значительное."
     elif adv >= 10:
