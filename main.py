@@ -26,6 +26,49 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+async def _start_health_server() -> asyncio.AbstractServer | None:
+    """
+    Railway web-service healthcheck: поднимаем минимальный HTTP endpoint на PORT,
+    не мешая long polling.
+    """
+    port_raw = os.getenv("PORT")
+    if not port_raw:
+        return None
+
+    try:
+        port = int(port_raw)
+    except ValueError:
+        log.warning("Некорректный PORT=%r, health server пропущен.", port_raw)
+        return None
+
+    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.read(1024)
+            body = b"ok"
+            response = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/plain; charset=utf-8\r\n"
+                b"Content-Length: 2\r\n"
+                b"Connection: close\r\n"
+                b"\r\n"
+                + body
+            )
+            writer.write(response)
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    server = await asyncio.start_server(_handle, host="0.0.0.0", port=port)
+    log.info("Health server слушает PORT=%s", port)
+    return server
+
+
 # ── Middleware: проверка доступа на каждый апдейт ──────────────────────────────
 
 from typing import Callable, Any, Awaitable
@@ -187,6 +230,7 @@ async def main():
     from aiogram import Bot, Dispatcher
     from aiogram.fsm.storage.memory import MemoryStorage
     from aiogram.client.default import DefaultBotProperties
+    from aiogram.exceptions import TelegramBadRequest
 
     from database import init_db, backup_db, create_history_snapshot
     from handlers import (
@@ -214,6 +258,7 @@ async def main():
 
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode="Markdown"))
     dp  = Dispatcher(storage=MemoryStorage())
+    health_server = await _start_health_server()
 
     # Middleware доступа (на уровне всего диспетчера)
     dp.update.middleware(AccessMiddleware())
@@ -248,9 +293,18 @@ async def main():
 
     log.info("Бот v6 запускается…")
     try:
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            log.info("Webhook очищен, polling может стартовать безопасно.")
+        except TelegramBadRequest as e:
+            log.warning("Не удалось очистить webhook: %s", e)
+
         await dp.start_polling(bot, drop_pending_updates=True)
     finally:
         scheduler.shutdown()
+        if health_server is not None:
+            health_server.close()
+            await health_server.wait_closed()
         await bot.session.close()
 
 
