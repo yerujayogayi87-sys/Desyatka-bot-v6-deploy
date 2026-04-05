@@ -12,7 +12,7 @@ from .db import (
     # Settings
     get_settings, save_settings,
     # Weights & predictions
-    get_weights, record_prediction,
+    get_weights, record_prediction, get_recent_miss_counts,
     update_strategy_stats, get_strategy_accuracy,
     # Export
     export_csv, export_json_file,

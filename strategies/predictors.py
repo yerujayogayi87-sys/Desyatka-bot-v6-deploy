@@ -611,7 +611,9 @@ def _select_signal_mode(top_pred: dict) -> tuple[str, str]:
 
     if tradable and eff_adv >= 12 and prob >= 14.0:
         return "number", "сильный edge по точному числу"
-    if zone_prob >= 43.0 and regime in {"mixed", "noise", "cold_start"}:
+    if parity_prob >= 54.0 and regime in {"mixed", "noise", "cold_start"}:
+        return "parity", "по чет/нечет сигнал стабильнее"
+    if zone_prob >= 40.0 and regime in {"mixed", "noise", "cold_start"}:
         return "zone", "число шумит, зона стабильнее"
     if parity_prob >= 56.0:
         return "parity", "по чет/нечет сигнал стабильнее"
@@ -771,6 +773,58 @@ def _pick_temperature(h_ratio: float, n_games: int) -> float:
     return 0.74
 
 
+def _apply_recent_miss_penalty(
+    combined: ScoreMap,
+    recent_miss_counts: dict[int, int] | None,
+) -> ScoreMap:
+    """
+    Мягко давит числа, которые недавно уже советовали и они не зашли.
+    Штраф ограничен, чтобы сильный новый сигнал всё ещё мог пройти наверх.
+    """
+    if not recent_miss_counts:
+        return combined
+
+    adjusted = dict(combined)
+    touched = False
+    for num, miss_count in recent_miss_counts.items():
+        if num not in adjusted or miss_count <= 0:
+            continue
+        penalty = min(0.36, 0.12 * miss_count)
+        adjusted[num] *= 1.0 - penalty
+        touched = True
+
+    return _normalize(adjusted) if touched else combined
+
+
+def _apply_recent_outcome_fatigue(
+    combined: ScoreMap,
+    games: list[dict],
+    regime: str,
+) -> ScoreMap:
+    """
+    В шумном режиме не даём последним выпавшим числам слишком легко лезть обратно в top-1.
+    Это режет навязчивые повторки, когда рынок выглядит как случайный.
+    """
+    if regime not in {"noise", "mixed"} or len(games) < 3:
+        return combined
+
+    recent_results = [int(g["result"]) for g in games[:4]]
+    decay = [0.16, 0.11, 0.07, 0.04]
+    penalties: dict[int, float] = {}
+    for idx, num in enumerate(recent_results):
+        penalties[num] = penalties.get(num, 0.0) + decay[idx]
+
+    adjusted = dict(combined)
+    touched = False
+    for num, penalty in penalties.items():
+        if num not in adjusted or penalty <= 0:
+            continue
+        adjusted[num] *= 1.0 - min(penalty, 0.30)
+        touched = True
+
+    return _normalize(adjusted) if touched else combined
+
+
 def _diversify_ranked(ranked: list[tuple[int, float]], top_n: int) -> list[tuple[int, float]]:
     """Диверсифицирует хвост top-N, сохраняя исходный top-1."""
     if not ranked or top_n <= 1:
@@ -813,6 +867,7 @@ def predict(
     weights:        dict[str, float],
     top_n:          int  = 3,
     pause_detected: bool = False,
+    recent_miss_counts: dict[int, int] | None = None,
 ) -> list[dict]:
     """
     Комбинированное предсказание.
@@ -845,12 +900,14 @@ def predict(
     combined = _apply_consensus_boost(combined, strat_scores, norm_w)
     combined = _blend_anchor(combined, games, h_ratio)
     combined = _calibrate_distribution(combined, games, h_ratio)
+    regime = _detect_regime(h_ratio, len(games), pause_detected)
+    combined = _apply_recent_outcome_fatigue(combined, games, regime)
+    combined = _apply_recent_miss_penalty(combined, recent_miss_counts)
 
     temperature = _pick_temperature(h_ratio, len(games))
 
     softmaxed = _softmax(combined, temperature=temperature)
     ranked    = sorted(softmaxed.items(), key=lambda x: x[1], reverse=True)
-    regime = _detect_regime(h_ratio, len(games), pause_detected)
     regime_factor = _regime_risk_factor(regime)
     market_views = _build_market_views(softmaxed)
 
@@ -1003,10 +1060,19 @@ def bet_recommendation(top_pred: dict, weights: dict) -> str:
     regime     = top_pred.get("regime", "mixed")
     tradable   = bool(top_pred.get("tradable", False))
     stake_factor = float(top_pred.get("stake_factor", 0.0))
+    signal_mode = top_pred.get("signal_mode", "skip")
+    parity_side = top_pred.get("parity_side", "—")
+    parity_prob = float(top_pred.get("parity_prob", 0.0))
+    zone_side   = top_pred.get("zone_side", "—")
+    zone_prob   = float(top_pred.get("zone_prob", 0.0))
 
     n_strats   = len(STRATEGY_FNS)
     consensus  = supporters >= n_strats - 2   # 5 из 7
 
+    if signal_mode == "parity" and parity_prob >= 54.0:
+        return f"⚖️ Играть {parity_side} — рынок точного числа шумный"
+    if signal_mode == "zone" and zone_prob >= 40.0:
+        return f"🧭 Играть зону {zone_side} — по ней сигнал стабильнее"
     if not tradable:
         reason = top_pred.get("trade_reason", "сигнал не прошёл фильтр")
         return f"🔴 Пропустить — {reason}"

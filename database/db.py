@@ -708,6 +708,33 @@ def record_prediction(user_id: int, strategy: str, predicted: int):
     con.close()
 
 
+def get_recent_miss_counts(user_id: int, strategy: str = "combined", limit: int = 8) -> dict[int, int]:
+    """
+    Возвращает счётчик недавних промахов по последним закрытым прогнозам.
+    Используется как мягкий штраф против бессмысленных повторов одного и того же числа.
+    """
+    con = _conn()
+    cur = con.cursor()
+    cur.execute(
+        """SELECT predicted, correct
+           FROM predictions
+           WHERE user_id=? AND strategy=? AND actual IS NOT NULL
+           ORDER BY id DESC
+           LIMIT ?""",
+        (user_id, strategy, limit),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    con.close()
+
+    misses: dict[int, int] = {}
+    for row in rows:
+        if row["correct"]:
+            continue
+        predicted = int(row["predicted"])
+        misses[predicted] = misses.get(predicted, 0) + 1
+    return misses
+
+
 def update_strategy_stats(user_id: int, actual: int):
     con = _conn()
     cur = con.cursor()

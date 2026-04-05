@@ -4,7 +4,7 @@ import logging
 from aiogram import Router
 from aiogram.types import CallbackQuery
 
-from database import get_games, get_weights, record_prediction, get_settings, is_allowed
+from database import get_games, get_weights, record_prediction, get_settings, is_allowed, get_recent_miss_counts
 from strategies import predict, bet_recommendation, strategy_top_predictions, evaluate_history_predictions
 from analytics import detect_pause, shannon_entropy
 from keyboards import kb_predict, kb_back_main
@@ -40,11 +40,12 @@ def _quality_guard(accuracy: dict[str, dict]) -> tuple[bool, str]:
 
     avg_top1 = sum(w.get("top1", 0.0) for w in windows) / len(windows)
     avg_top3 = sum(w.get("top3", 0.0) for w in windows) / len(windows)
+    avg_parity = sum(w.get("parity", 0.0) for w in windows) / len(windows)
 
     # База случайного уровня: top-1=9.1%, top-3=27.3%
-    if avg_top1 < 12.0 or avg_top3 < 30.0:
+    if avg_top1 < 11.0 and avg_top3 < 30.0 and avg_parity < 54.0:
         return False, (
-            f"Модель около случайного уровня (top-1 {avg_top1:.1f}%, top-3 {avg_top3:.1f}%)."
+            f"Модель около случайного уровня (top-1 {avg_top1:.1f}%, top-3 {avg_top3:.1f}%, parity {avg_parity:.1f}%)."
         )
     return True, "OK"
 
@@ -67,14 +68,15 @@ async def _make_prediction(uid: int, pause_override: bool = False) -> tuple[str,
     pd      = (pause_h is not None) and not pause_override
 
     weights = get_weights(uid)
-    preds   = predict(games, weights, top_n=3, pause_detected=pd)
+    recent_misses = get_recent_miss_counts(uid)
+    preds   = predict(games, weights, top_n=3, pause_detected=pd, recent_miss_counts=recent_misses)
     accuracy = evaluate_history_predictions(games, sample_sizes=(50, 100))
     quality_ok, quality_reason = _quality_guard(accuracy)
 
     _record_prediction_set(uid, games, preds)
 
     bet_rec     = bet_recommendation(preds[0], weights) if preds else "—"
-    if preds and (not quality_ok):
+    if preds and (not quality_ok) and preds[0].get("signal_mode") == "number":
         bet_rec = f"🔴 Пропустить — {quality_reason}"
     H           = shannon_entropy(games, window=25)
     pause_note = ""
@@ -124,7 +126,8 @@ async def cb_predict_detail(callback: CallbackQuery):
         return
 
     weights = get_weights(uid)
-    preds   = predict(games, weights, top_n=3)
+    recent_misses = get_recent_miss_counts(uid)
+    preds   = predict(games, weights, top_n=3, recent_miss_counts=recent_misses)
     H       = shannon_entropy(games, window=25)
 
     text = (
@@ -152,7 +155,8 @@ async def cb_predict_audit(callback: CallbackQuery):
         return
 
     weights = get_weights(uid)
-    preds = predict(games, weights, top_n=3)
+    recent_misses = get_recent_miss_counts(uid)
+    preds = predict(games, weights, top_n=3, recent_miss_counts=recent_misses)
     accuracy = evaluate_history_predictions(games, sample_sizes=(50, 100, None))
     quality_ok, quality_reason = _quality_guard(accuracy)
     top = preds[0] if preds else {}

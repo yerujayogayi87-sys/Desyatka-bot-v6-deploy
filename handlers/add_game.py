@@ -17,6 +17,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database import (
     add_game, add_games_bulk, get_games, get_total, get_weights,
     record_prediction, update_strategy_stats, get_settings, is_allowed,
+    get_recent_miss_counts,
 )
 from strategies import predict, bet_recommendation, strategy_top_predictions
 from analytics import get_alerts, detect_pause, shannon_entropy
@@ -254,7 +255,8 @@ async def _handle_bulk(message: Message, results: list):
 
     if len(games) >= 5:
         weights    = get_weights(uid)
-        preds      = predict(games, weights, top_n=3)
+        recent_misses = get_recent_miss_counts(uid)
+        preds      = predict(games, weights, top_n=3, recent_miss_counts=recent_misses)
         _record_all_preds(uid, preds)
         _record_strategy_preds(uid, games)
         bet_rec    = bet_recommendation(preds[0], weights) if preds else ""
@@ -369,7 +371,8 @@ async def _send_add_result(callback, uid, result, new_id, total, game_number, ga
 
     if len(games) >= 5:
         weights    = get_weights(uid)
-        preds      = predict(games, weights, top_n=3, pause_detected=pause_detected)
+        recent_misses = get_recent_miss_counts(uid)
+        preds      = predict(games, weights, top_n=3, pause_detected=pause_detected, recent_miss_counts=recent_misses)
         _record_all_preds(uid, preds)
         _record_strategy_preds(uid, games)
         bet_rec    = bet_recommendation(preds[0], weights) if preds else ""

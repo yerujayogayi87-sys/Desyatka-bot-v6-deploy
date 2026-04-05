@@ -14,7 +14,7 @@ from aiogram.types import CallbackQuery, FSInputFile, BufferedInputFile
 
 from database import (
     get_games, get_total, get_strategy_accuracy, get_weights,
-    export_csv, export_json_file, is_allowed,
+    export_csv, export_json_file, is_allowed, get_recent_miss_counts,
 )
 from analytics import (
     frequency, hot_cold, gap_analysis, even_odd_streak,
@@ -487,7 +487,8 @@ async def cb_autopilot(callback: CallbackQuery):
         return
 
     weights = get_weights(uid)
-    preds   = predict(games, weights, top_n=3)
+    recent_misses = get_recent_miss_counts(uid)
+    preds   = predict(games, weights, top_n=3, recent_miss_counts=recent_misses)
     if not preds:
         await callback.answer("Не удалось построить прогноз.", show_alert=True)
         return

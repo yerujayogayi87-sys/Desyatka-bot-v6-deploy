@@ -97,9 +97,42 @@ def fmt_pred_brief(preds: list[dict]) -> str:
     reserves = " · ".join(ne(p["number"]) for p in preds[1:3]) or "—"
     tradable = "да" if top.get("tradable") else "нет"
     stake_pct = int(float(top.get("stake_factor", 0.0)) * 100)
+    mode = top.get("signal_mode", "skip")
+
+    if mode == "number" and top.get("tradable"):
+        return (
+            f"🎯 *Основное число:* {ne(top['number'])}\n"
+            f"📦 *Запасные:* {reserves}\n"
+            f"📊 *Вероятность:* {top.get('probability', 0):.1f}% · "
+            f"Сила {top.get('strength', 0):.0f}/100\n"
+            f"🛡 *Фильтр сделки:* {tradable} · доля {stake_pct}%"
+        )
+
+    if mode == "parity":
+        return (
+            f"⚖️ *Основной сигнал:* {top.get('parity_side', '—')} "
+            f"({top.get('parity_prob', 0):.1f}%)\n"
+            f"👀 *Число-кандидат:* {ne(top['number'])}\n"
+            f"📦 *Запасные:* {reserves}\n"
+            f"📊 *Вероятность числа:* {top.get('probability', 0):.1f}% · "
+            f"Сила {top.get('strength', 0):.0f}/100\n"
+            f"🛡 *Фильтр сделки:* {tradable} · доля {stake_pct}%"
+        )
+
+    if mode == "zone":
+        return (
+            f"🧭 *Основной сигнал:* зона {top.get('zone_side', '—')} "
+            f"({top.get('zone_prob', 0):.1f}%)\n"
+            f"👀 *Число-кандидат:* {ne(top['number'])}\n"
+            f"📦 *Запасные:* {reserves}\n"
+            f"📊 *Вероятность числа:* {top.get('probability', 0):.1f}% · "
+            f"Сила {top.get('strength', 0):.0f}/100\n"
+            f"🛡 *Фильтр сделки:* {tradable} · доля {stake_pct}%"
+        )
+
     if not top.get("tradable"):
         return (
-            "🚫 *Сигнал:* не подтверждён (ставка не рекомендуется)\n"
+            "🚫 *Основной сигнал:* пропуск\n"
             f"👀 *Кандидат для наблюдения:* {ne(top['number'])}\n"
             f"📦 *Альтернативы:* {reserves}\n"
             f"📊 *Вероятность:* {top.get('probability', 0):.1f}% · "
@@ -107,7 +140,7 @@ def fmt_pred_brief(preds: list[dict]) -> str:
             f"🛡 *Фильтр сделки:* {tradable} · доля {stake_pct}%"
         )
     return (
-        f"🎯 *Основное число:* {ne(top['number'])}\n"
+        f"👀 *Число-кандидат:* {ne(top['number'])}\n"
         f"📦 *Запасные:* {reserves}\n"
         f"📊 *Вероятность:* {top.get('probability', 0):.1f}% · "
         f"Сила {top.get('strength', 0):.0f}/100\n"
